@@ -1,0 +1,31 @@
+{
+  "name": "feeld-swiper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local web app that swipes Feeld on your behalf by driving the real Android app in an emulator, liking only profiles likely to be vegan/vegetarian or otherwise not subsidizing factory farming.",
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false src/server.ts",
+    "start": "tsx src/server.ts",
+    "emulator": "scripts/emulator.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "sharp": "^0.35.4",
+    "ws": "^8.18.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

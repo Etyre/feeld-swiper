@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Feeld Swiper</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <div class="brand">🌱 Feeld Swiper</div>
+  <nav class="tabs">
+    <button class="tab on" data-tab="swipe">Live</button>
+    <button class="tab" data-tab="queue">To review <span id="queueCount" class="count"></span></button>
+    <button class="tab" data-tab="review">History <span id="reviewCount" class="count"></span></button>
+  </nav>
+  <div class="status"><span id="statusDot" class="dot"></span><span id="statusText">idle</span><span id="batchText" class="batch"></span></div>
+  <div class="actions">
+    <button id="startBtn" class="primary" title="Browse Discover for a random 10–150 minute session: apply your reviews, judge new profiles">Start batch</button>
+    <button id="stopBtn" class="ghost">Stop</button>
+  </div>
+</header>
+
+<main id="tab-swipe" class="tabpane three">
+  <aside class="panel settings">
+    <h2>Settings</h2>
+
+    <p class="hint"><b>Start batch</b> browses Discover for a random session length. New profiles are judged and browsed past <b>without</b> a like or pass; you decide in the <b>To review</b> tab, and the next batch does your likes, pings and passes when those profiles come round again.</p>
+
+    <label class="row">
+      <span>Prior <b id="priorVal"></b></span>
+      <input id="prior" type="range" min="0.01" max="0.99" step="0.01" />
+    </label>
+    <p class="hint">Base rate of qualifying profiles in your pool. Needed likelihood ratio for 50%: <b id="lrNeeded"></b>×</p>
+
+    <label class="row"><span>Quick pass below <b id="quickPassVal"></b></span>
+      <input id="quickPassBelow" type="range" min="0" max="1" step="0.01" />
+    </label>
+    <p class="hint">First it judges on the profile text and the first screen. Below this score it decides on that alone. Otherwise it sends every screen and re-scores with the full set. At 100% every profile is judged on text and first screen only; at 0% every profile gets the full look.</p>
+
+    <label class="row">
+      <span>Like threshold <b id="thresholdVal"></b></span>
+      <input id="threshold" type="range" min="0" max="1" step="0.01" />
+    </label>
+    <p class="hint">Recommend a like when P(meets criteria) ≥ threshold.</p>
+
+    <label class="row"><span>Ping</span>
+      <select id="pingEnabled"><option value="false">Off</option><option value="true">On</option></select>
+    </label>
+    <div id="pingOpts">
+      <label class="row">
+        <span>Recommend a ping when P ≥ <b id="pingVal"></b></span>
+        <input id="pingThreshold" type="range" min="0" max="1" step="0.01" />
+      </label>
+      <label class="row"><span>Drafting model</span>
+        <select id="draftModel">
+          <option value="claude-opus-5">Claude Opus 5 (recommended)</option>
+          <option value="claude-fable-5-1">Claude Fable 5.1</option>
+          <option value="claude-sonnet-5">Claude Sonnet 5</option>
+          <option value="claude-opus-4-8">Claude Opus 4.8</option>
+          <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
+        </select>
+      </label>
+      <label class="row"><span>About you, for the drafts</span>
+        <textarea id="pingPersona" rows="4" placeholder="Who you are, what you're into, how you write. E.g. 'Vegan, into philosophy and climbing, dry humour, lowercase, no emojis. Ask a real question, don't gush.'"></textarea>
+      </label>
+    </div>
+    <p class="hint">A ping is Feeld's super like: a like that carries a message, sent before you match. For each recommended ping the drafting model writes three openers in your voice; you pick one, or write your own, in the To review tab. You can also ping any profile from its card. When Feeld is out of pings, the app sends a regular like instead.</p>
+
+    <label class="row"><span>Intellectual exception</span>
+      <select id="intellectualEnabled"><option value="true">On</option><option value="false">Off</option></select>
+    </label>
+    <p class="hint">If the model puts a profile at 60% or more likely to be exceptionally intelligent, intellectual, philosophical, thoughtful and open-minded, it recommends a like regardless of the diet score. Flag reference cases on cards with the 🧠 button; they're shown to the model.</p>
+
+    <h2>Batches</h2>
+    <label class="row"><span>Batch length (minutes, random between)</span>
+      <span class="pair"><input id="batchMinMinutes" type="number" min="1" max="600" /><input id="batchMaxMinutes" type="number" min="1" max="600" /></span>
+    </label>
+    <p class="hint">Each Start runs one batch, like a person browsing for a while, then stops. Also stops when Feeld runs out of profiles or likes, or when it keeps showing profiles you've already seen.</p>
+    <label class="row"><span>After a batch</span>
+      <select id="continuous"><option value="false">Stop and wait for me</option><option value="true">Take a break, then start the next batch</option></select>
+    </label>
+    <div id="continuousOpts">
+      <label class="row"><span>Break length (minutes, random between)</span>
+        <span class="pair"><input id="breakMinMinutes" type="number" min="1" /><input id="breakMaxMinutes" type="number" min="1" /></span>
+      </label>
+      <label class="row"><span>Only start batches between (hours, 24h)</span>
+        <span class="pair"><input id="activeStartHour" type="number" min="0" max="23" /><input id="activeEndHour" type="number" min="1" max="24" /></span>
+      </label>
+    </div>
+    <label class="row"><span>Max profiles / batch (judged or acted on)</span><input id="maxProfilesPerBatch" type="number" min="1" max="1000" /></label>
+
+    <h2>Behavior</h2>
+    <label class="row"><span>Next profile gesture (no vote)</span>
+      <select id="advanceGesture">
+        <option value="swipe-left">Swipe the card left (drag right → left)</option>
+        <option value="swipe-right">Swipe the card right (drag left → right)</option>
+        <option value="scroll-down">Keep scrolling down (vertical feed)</option>
+      </select>
+    </label>
+    <p class="hint">How to move past a profile <b>without</b> liking or passing. Test it first with <b>Next (no vote)</b> on the phone panel and watch the phone: if a heart or X flashes, or a match screen appears, that gesture is a vote on your build; pick another. A batch stops itself if the gesture ever produces a match screen.</p>
+    <label class="row"><span>Delay between profiles (ms)</span>
+      <span class="pair"><input id="minDelayMs" type="number" min="500" step="100" /><input id="maxDelayMs" type="number" min="500" step="100" /></span>
+    </label>
+    <label class="row"><span>Browse like a human</span>
+      <select id="humanize"><option value="true">On (uneven scrolling, double-takes, linger before a like)</option><option value="false">Off (fast, mechanical)</option></select>
+    </label>
+    <label class="row"><span>Max screens sent to model</span><input id="maxScreens" type="number" min="1" max="12" /></label>
+    <p class="hint">Screenshots of the profile, evenly spaced from top to bottom. Each costs roughly a thousand input tokens.</p>
+    <label class="row"><span>Max scrolls per profile</span><input id="maxProfileScrolls" type="number" min="1" max="30" /></label>
+    <label class="row"><span>Model</span>
+      <select id="model">
+        <option value="claude-opus-5">Claude Opus 5 (recommended · $5 / $25 per M tokens)</option>
+        <option value="claude-sonnet-5">Claude Sonnet 5 (cheaper · $2 / $10)</option>
+        <option value="claude-haiku-4-5">Claude Haiku 4.5 (cheapest · $1 / $5, no effort control)</option>
+        <option value="claude-opus-4-8">Claude Opus 4.8 ($5 / $25)</option>
+        <option value="claude-fable-5-1">Claude Fable 5.1 (most capable · $10 / $50)</option>
+      </select>
+    </label>
+    <label class="row"><span>Effort</span>
+      <select id="effort"><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
+    </label>
+    <p class="hint" id="effortHint"></p>
+    <label class="row"><span>Written reasoning</span>
+      <select id="captureReasoning"><option value="false">Off (faster; evidence list only)</option><option value="true">On (adds a reasoning paragraph to each card)</option></select>
+    </label>
+
+    <h2>Device</h2>
+    <label class="row"><span>Virtual device (AVD name)</span><input id="avdName" type="text" /></label>
+    <p class="hint">Booted in the background when nothing is connected. Create it once with <code>npm run emulator</code>.</p>
+    <label class="row"><span>Emulator window</span>
+      <select id="emulatorWindow"><option value="false">Hidden (use the phone panel here)</option><option value="true">Show the emulator's own window too</option></select>
+    </label>
+    <label class="row"><span>When this app quits</span>
+      <select id="stopEmulatorOnExit"><option value="false">Leave the phone running (keeps you logged in)</option><option value="true">Shut the emulator down</option></select>
+    </label>
+    <label class="row"><span>Use a specific device (adb serial)</span><input id="deviceSerial" type="text" placeholder="empty = the virtual device above" /></label>
+    <p class="hint">A real Android phone over USB with debugging on works too; the phone panel drives it the same way.</p>
+
+    <h2>Guidance for the model</h2>
+    <textarea id="userGuidance" rows="5" placeholder="Standing instructions, e.g. 'Pescatarian counts as a yes for me' or 'Don't read anything into yoga.' Included in every prompt, along with your grades and notes on past calls."></textarea>
+    <button id="saveBtn" class="primary wide">Save settings</button>
+    <p class="hint" id="saveMsg"></p>
+
+    <h2>Stats</h2>
+    <div class="stats" style="grid-template-columns: repeat(6, 1fr)">
+      <div><b id="sSeen">0</b><span>seen</span></div>
+      <div><b id="sPending">0</b><span>to review</span></div>
+      <div><b id="sQueued">0</b><span>queued</span></div>
+      <div><b id="sLiked">0</b><span>liked</span></div>
+      <div><b id="sPinged">0</b><span>pinged</span></div>
+      <div><b id="sSession">0</b><span>sent this batch</span></div>
+    </div>
+
+    <h2>Log</h2>
+    <pre id="log" class="log"></pre>
+  </aside>
+
+  <section class="feed">
+    <h2>On the phone now</h2>
+    <div id="current" class="current empty"></div>
+
+    <h2>Recent</h2>
+    <div id="decisions"></div>
+  </section>
+
+  <aside class="panel phonecol">
+    <h2>Phone <span id="fps" class="fps"></span></h2>
+    <div id="phone" tabindex="0" title="Click to tap, drag to swipe, type when focused">
+      <img id="shot" alt="" />
+      <div id="phoneMsg">Connecting to the phone…</div>
+    </div>
+    <div class="prow">
+      <button data-key="BACK" title="Back">◁</button>
+      <button data-key="HOME" title="Home">○</button>
+      <button data-key="RECENTS" title="Recents">▢</button>
+      <button data-key="Enter" title="Enter">⏎</button>
+    </div>
+    <input id="sendText" placeholder="Type here and press Enter to send text to the phone" />
+    <p class="hint">Click = tap, drag = swipe. With the phone focused, keys type into its focused field; paste works too.</p>
+
+    <h2>Setup</h2>
+    <div class="steps">
+      <div class="step"><span class="ic" id="stDevice">○</span><span>Phone connected <span id="deviceLabel" class="muted"></span></span></div>
+      <div class="step"><span class="ic" id="stGoogle">○</span><span>Google account signed in <span id="googleAcct" class="muted"></span></span></div>
+      <div class="step"><span class="ic" id="stFeeld">○</span><span>Feeld installed</span></div>
+      <div class="step"><span class="ic" id="stLogin">○</span><span>Logged in to Feeld (done on the phone panel)</span></div>
+    </div>
+    <div id="setupMsg" class="note" hidden></div>
+    <div id="googleForm" hidden>
+      <label class="row"><span>Google email</span><input id="gEmail" type="email" autocomplete="username" placeholder="you@gmail.com" /></label>
+      <label class="row"><span>Google password</span><input id="gPass" type="password" autocomplete="current-password" /></label>
+      <p class="hint">Used once to sign the emulator into the Play Store. Sent only to this app on your machine; never stored. If Google asks for 2-step verification, complete it on the phone panel and setup continues.</p>
+      <button id="setupRun" class="primary wide">Sign in to Google &amp; install Feeld</button>
+    </div>
+    <div id="installOnly" hidden>
+      <button id="setupInstall" class="primary wide">Install Feeld from the Play Store</button>
+    </div>
+    <details class="apk"><summary>Or sideload an APK</summary>
+      <label class="row"><span>Path(s) to .apk files on this Mac, one per line</span><textarea id="apkPaths" rows="2" placeholder="/Users/you/Downloads/feeld.apk"></textarea></label>
+      <button id="apkInstall" class="wide">Install APK</button>
+    </details>
+
+    <h2>Manual controls</h2>
+    <div class="prow">
+      <button data-action="pass" class="passbtn">✕ Pass</button>
+      <button data-action="next" title="Move to the next profile without liking or passing, using the gesture from Settings">Next (no vote)</button>
+      <button data-action="like" class="likebtn">♥ Like</button>
+    </div>
+    <div class="prow">
+      <button data-action="dismiss">Dismiss popup</button>
+      <button data-action="discover">Open Feeld</button>
+      <button data-action="restart">Restart Feeld</button>
+    </div>
+    <button id="inspectBtn" class="wide">Inspect screen (diagnostics)</button>
+    <pre id="inspect" class="log" hidden></pre>
+  </aside>
+</main>
+
+<main id="tab-queue" class="tabpane" hidden>
+  <section class="review">
+    <div class="filters panel queuefilters">
+      <label class="row"><span>Show</span>
+        <select id="qShow"><option value="all">Everything waiting</option><option value="like">Recommended like or ping</option><option value="ping">Recommended ping</option><option value="pass">Recommended pass</option><option value="exception">🧠 Intellectual exception</option><option value="skipped">Not scored</option></select>
+      </label>
+      <label class="row"><span>Sort</span>
+        <select id="qSort"><option value="prob">P(veg*n), high to low</option><option value="int">Exception probability, high to low</option><option value="time">Newest first</option><option value="oldest">Oldest first</option><option value="near">Nearest first</option></select>
+      </label>
+      <div class="row bulk">
+        <span>Bulk</span>
+        <span class="pair">
+          <button id="bulkPass" title="Queue a pass for every recommended pass currently shown">Pass on all recommended passes shown</button>
+          <button id="bulkSkip" title="Leave every profile shown alone: no like, no pass">Leave all shown alone</button>
+        </span>
+      </div>
+      <div class="filterSummary" id="queueSummary"></div>
+    </div>
+    <p class="hint queuehint">Your choice is queued; the next batch does it on Feeld when the profile comes round again. <kbd>←</kbd> pass and <kbd>→</kbd> like act on the top card.</p>
+    <button id="queuePending" class="pending" hidden></button>
+    <div id="queueList" class="reviewList"></div>
+  </section>
+</main>
+
+<main id="tab-review" class="tabpane" hidden>
+  <section class="review">
+    <div class="filters panel">
+      <label class="row">
+        <span>Show profiles with <select id="minPWhich" class="inline"><option value="veg">P(veg*n)</option><option value="int">P(exception)</option></select> ≥ <b id="minPVal">0%</b></span>
+        <input id="minP" type="range" min="0" max="1" step="0.05" value="0" />
+      </label>
+      <label class="row"><span>Batch</span>
+        <select id="fBatch"><option value="all">All batches</option></select>
+      </label>
+      <label class="row"><span>Model's call</span>
+        <select id="fAction"><option value="all">All</option><option value="like">Recommended like or ping</option><option value="ping">Recommended ping</option><option value="pass">Recommended pass</option><option value="exception">🧠 Intellectual exception</option><option value="skipped">Not scored</option></select>
+      </label>
+      <label class="row"><span>Your grade</span>
+        <select id="fVerdict"><option value="all">All</option><option value="ungraded">Not graded yet</option><option value="higher">Should be higher</option><option value="lower">Should be lower</option><option value="about_right">About right</option></select>
+      </label>
+      <label class="row"><span>Your review</span>
+        <select id="fSwipe"><option value="all">All</option><option value="none">Not reviewed yet</option><option value="like">Like</option><option value="ping">Ping</option><option value="pass">Pass</option><option value="skip">Left alone</option><option value="queued">Queued, not done yet</option><option value="applied">Done on Feeld</option></select>
+      </label>
+      <label class="row"><span>Probability shown</span>
+        <select id="fProb"><option value="gut">Model's gut check</option><option value="both">Gut check + arithmetic</option></select>
+      </label>
+      <label class="row"><span>Sort</span>
+        <select id="fSort"><option value="prob">P(veg*n), high to low</option><option value="int">Intellectually Open-minded Exception probability, high to low</option><option value="time">Newest first</option><option value="oldest">Oldest first</option><option value="near">Nearest first</option></select>
+      </label>
+      <div class="filterSummary" id="filterSummary"></div>
+    </div>
+    <button id="reviewPending" class="pending" hidden></button>
+    <div id="reviewList" class="reviewList"></div>
+  </section>
+</main>
+
+<template id="cardTpl">
+  <article class="card">
+    <div class="photos"></div>
+    <div class="body">
+      <div class="top">
+        <h3 class="name"></h3>
+        <span class="badge action"></span>
+      </div>
+      <div class="prob"><div class="bar"><div class="fill"></div><div class="thresh" title="Like threshold"></div><div class="thresh super" title="Ping threshold" hidden></div></div><span class="pval"></span></div>
+      <div class="model"><span class="badge modelchip"></span><span class="stage"></span></div>
+      <div class="diet"></div>
+      <ul class="evidence"></ul>
+      <details><summary>Reasoning</summary><p class="reasoning"></p></details>
+      <details><summary>Profile text</summary><pre class="ptext"></pre></details>
+      <details class="screensBox"><summary>Screens</summary><div class="screens"></div></details>
+      <div class="reviewbar">
+        <span class="rlabel"></span>
+        <span class="rbtns">
+          <button class="rbtn pass" data-c="pass" title="Queue a pass (X) on Feeld">✕ Pass</button>
+          <button class="rbtn like" data-c="like" title="Queue a like on Feeld">♥ Like</button>
+          <button class="rbtn ping" data-c="ping" title="Queue a ping: a like with a message">✦ Ping…</button>
+          <button class="rbtn skip" data-c="skip" title="Do nothing on Feeld for this profile">Leave it</button>
+        </span>
+      </div>
+      <div class="pingbox" hidden>
+        <div class="drafts"></div>
+        <label class="draft own"><input type="radio" value="own" /><span class="dtext"><b>Write my own</b></span></label>
+        <textarea class="ownmsg" rows="2" maxlength="280" placeholder="Your message (up to 280 characters)"></textarea>
+        <div class="pingactions">
+          <button class="primary queueping">Queue this ping</button>
+          <button class="redraft">Redraft</button>
+          <button class="cancelping ghost">Cancel</button>
+          <span class="pinghint"></span>
+        </div>
+      </div>
+      <div class="verdict">
+        <span class="vlabel"></span>
+        <span class="vbtns">
+          <button class="vbtn lower" data-v="lower" title="The model's probability should have been lower">⬇ Lower probability</button>
+          <button class="vbtn right" data-v="about_right" title="The model's probability was about right">✓ No change</button>
+          <button class="vbtn higher" data-v="higher" title="The model's probability should have been higher">⬆ Higher probability</button>
+        </span>
+        <button class="vbtn exemplar" title="Flag this profile as a reference case of the intellectual exception (shown to the model)">🧠 Exception</button>
+        <label class="userp"><span>Your estimate</span><input type="number" class="userpRange" min="0" max="100" step="1" placeholder="–" /><span>%</span></label>
+      </div>
+      <textarea class="note" rows="2" placeholder="Notes for the model: what did it miss or over-weight here? Saved on blur; fed into future prompts."></textarea>
+      <div class="meta"></div>
+    </div>
+  </article>
+</template>
+
+<script src="/app.js"></script>
+</body>
+</html>
