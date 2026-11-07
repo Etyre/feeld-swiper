@@ -1,3 +1,14 @@
+/**
+ * Feeld Swiper: a local dashboard (http://localhost:4848) that drives the real Feeld Android app
+ * in an emulator over ADB, has Claude score each profile for P(veg*n) and P(fit), queues the
+ * calls for your review, and then sends your likes, pings and passes. This file is the server:
+ * the HTTP API, the phone-screen WebSocket, and the wiring between the dashboard and the Swiper.
+ *
+ * Config:  .env in the project folder (ANTHROPIC_API_KEY, PORT) and data/settings.json (edited from the dashboard).
+ * State:   data/decisions.jsonl, data/photos/, data/errors/  (or $FEELD_DATA_DIR instead of data/).
+ * Logs:    data/server.log when started from the Dock launcher; stdout under `npm run dev`.
+ * LLM:     src/llm.ts; every system prompt starts with ../shared/llm-system-prompt-preamble.md.
+ */
 import "dotenv/config";
 import express from "express";
 import http from "node:http";
@@ -8,9 +19,11 @@ import sharp from "sharp";
 import { WebSocketServer } from "ws";
 import { PUBLIC_DIR, PHOTOS_DIR } from "./paths.js";
 import { loadSettings, updateSettings } from "./config.js";
-import { getDecision, readDecisions, setVerdict, stats, updateDecision, updateMany, type Decision } from "./store.js";
-import { draftPings, screensOf, MAX_PING_CHARS } from "./drafts.js";
+import { backendLabel, ContactedEliError } from "./llm.js";
+import { getDecision, pastPings, readDecisions, setVerdict, stats, updateDecision, updateMany, type Decision, type Verdict, type VerdictPatch } from "./store.js";
+import { draftPings, pastPingExamples, screensOf, MAX_PING_CHARS } from "./drafts.js";
 import { Swiper } from "./swiper.js";
+import { rescoreDecisions, retier } from "./rescore.js";
 import { ScreenStream, type InputMessage } from "./screen.js";
 import { SetupWizard } from "./setup.js";
 
@@ -76,15 +89,49 @@ app.get("/api/decisions", (req, res) => {
   const limit = Math.min(parseInt(String(req.query.limit ?? "100"), 10) || 100, 100_000);
   res.json(readDecisions(limit));
 });
+/** Grade the diet call (verdict + userProbability 0-1) and/or the fit call (fitVerdict + userFitPercentile 0-100). Only the keys sent are changed; null clears one. */
 app.post("/api/decisions/:id/verdict", (req, res) => {
-  const v = req.body?.verdict;
-  const up = req.body?.userProbability;
-  if (!["higher", "about_right", "lower", null].includes(v)) return res.status(400).json({ error: "verdict must be higher, about_right, lower, or null" });
-  if (up !== undefined && up !== null && (typeof up !== "number" || up < 0 || up > 1)) return res.status(400).json({ error: "userProbability must be 0-1" });
-  const d = setVerdict(String(req.params.id), v, up);
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const patch: VerdictPatch = {};
+  const isVerdict = (v: unknown): v is Verdict | null => v === null || v === "higher" || v === "about_right" || v === "lower";
+  const inRange = (v: unknown, max: number): v is number | null => v === null || (typeof v === "number" && v >= 0 && v <= max);
+  if ("verdict" in b) {
+    if (!isVerdict(b.verdict)) return res.status(400).json({ error: "verdict must be higher, about_right, lower, or null" });
+    patch.verdict = b.verdict;
+  }
+  if ("fitVerdict" in b) {
+    if (!isVerdict(b.fitVerdict)) return res.status(400).json({ error: "fitVerdict must be higher, about_right, lower, or null" });
+    patch.fitVerdict = b.fitVerdict;
+  }
+  if ("userProbability" in b) {
+    if (!inRange(b.userProbability, 1)) return res.status(400).json({ error: "userProbability must be 0-1" });
+    patch.userProbability = b.userProbability;
+  }
+  if ("userFitPercentile" in b) {
+    if (!inRange(b.userFitPercentile, 100)) return res.status(400).json({ error: "userFitPercentile must be 0-100" });
+    patch.userFitPercentile = b.userFitPercentile;
+  }
+  if (!Object.keys(patch).length) return res.status(400).json({ error: "nothing to grade: send verdict, fitVerdict, userProbability or userFitPercentile" });
+  const d = setVerdict(String(req.params.id), patch);
   if (!d) return res.status(404).json({ error: "decision not found" });
   res.json({ decision: d, stats: stats() });
 });
+
+/**
+ * Your like or pass is also a grade on whichever call earned the recommendation, unless you graded that
+ * call yourself already: a pass on a profile recommended for diet says the diet probability should have
+ * been lower, a pass on one recommended for fit says the fit percentile should have been lower, and a like
+ * says the call was about right. A like on a recommended pass could be for either reason, so it grades
+ * nothing. Tier moves are fed back to the model separately.
+ */
+function impliedVerdict(d: Decision, choice: string | null): Partial<Decision> {
+  if (!choice || choice === "skip" || !d.classification || d.action === "skipped") return {};
+  const patch: Partial<Decision> = {};
+  const grade: Verdict = choice === "pass" ? "lower" : "about_right";
+  if ((d.likedFor === "veg" || d.likedFor === "both") && d.verdict == null) patch.verdict = grade;
+  if ((d.likedFor === "fit" || d.likedFor === "both") && d.fitVerdict == null) patch.fitVerdict = grade;
+  return patch;
+}
 /** Your review of a provisional call: what to do on Feeld when the profile comes up again. */
 app.post("/api/decisions/:id/review", (req, res) => {
   const choice = req.body?.choice;
@@ -98,12 +145,14 @@ app.post("/api/decisions/:id/review", (req, res) => {
     if (typeof message !== "string" || !message.trim()) return res.status(400).json({ error: "a ping needs a message" });
     if (message.trim().length > MAX_PING_CHARS) return res.status(400).json({ error: `ping messages are at most ${MAX_PING_CHARS} characters` });
     patch.pingMessage = message.trim();
+    // Provenance: which draft they started from and whether they changed it. Both feed the drafter next time.
+    const idx = req.body?.draftIndex;
+    const original = typeof idx === "number" ? d.pingDrafts?.[idx]?.text ?? null : null;
+    patch.pingDraftIndex = original ? idx : null;
+    patch.pingDraftOriginal = original;
+    patch.pingEdited = original ? original.trim() !== patch.pingMessage : true;
   }
-  // Your like or pass is also a grade on the model's call, unless you graded it yourself already.
-  if (choice && choice !== "skip" && d.classification && d.verdict == null && d.action !== "skipped") {
-    const recommendedLike = d.action !== "recommend_pass";
-    patch.verdict = (choice !== "pass") === recommendedLike ? "about_right" : choice !== "pass" ? "higher" : "lower";
-  }
+  Object.assign(patch, impliedVerdict(d, choice));
   const updated = updateDecision(d.id, patch);
   if (!updated) return res.status(404).json({ error: "decision not found" });
   broadcast("decision", updated);
@@ -121,10 +170,7 @@ app.post("/api/review/bulk", (req, res) => {
     const d = getDecision(id);
     if (!d || d.applied) continue;
     const patch: Partial<Decision> = { review: choice, reviewedAt: choice ? now : null };
-    if (choice && choice !== "skip" && d.classification && d.verdict == null && d.action !== "skipped") {
-      const recommendedLike = d.action !== "recommend_pass";
-      patch.verdict = (choice !== "pass") === recommendedLike ? "about_right" : choice !== "pass" ? "higher" : "lower";
-    }
+    Object.assign(patch, impliedVerdict(d, choice));
     patches.set(id, patch);
   }
   const updated = updateMany(patches);
@@ -143,10 +189,13 @@ app.post("/api/decisions/:id/drafts", async (req, res) => {
   try {
     const settings = loadSettings();
     const screens = await screensOf(d, 3);
-    const r = await draftPings({ name: d.name, age: d.age, profileText: d.profileText, screens, evidence: d.classification?.evidence }, settings);
+    const r = await draftPings(
+      { name: d.name, age: d.age, profileText: d.profileText, screens, evidence: d.classification?.evidence, pastPings: pastPingExamples(pastPings().filter((p) => p.id !== id)) },
+      settings,
+    );
     const updated = updateDecision(id, { pingDrafts: r.drafts, draftsModel: settings.draftModel });
     if (!updated) return res.status(404).json({ error: "decision not found" });
-    swiper.log(`Drafted ${r.drafts.length} ping openers for ${d.name ?? "unknown"} with ${settings.draftModel} (${r.usage.input + r.usage.cacheRead} in / ${r.usage.output} out tokens).`);
+    swiper.log(`Drafted ${r.drafts.length} ping openers for ${d.name ?? "unknown"} with ${settings.draftModel} via ${backendLabel(settings)} (${r.usage.input + r.usage.cacheRead} in / ${r.usage.output} out tokens).`);
     broadcast("decision", updated);
     res.json({ decision: updated });
   } catch (e) {
@@ -164,20 +213,109 @@ app.post("/api/decisions/:id/note", (req, res) => {
 });
 app.post("/api/decisions/:id/exemplar", (req, res) => {
   const ex = req.body?.exemplar;
-  if (ex !== "intellectual" && ex !== null) return res.status(400).json({ error: "exemplar must be 'intellectual' or null" });
+  if (ex !== "fit" && ex !== null) return res.status(400).json({ error: "exemplar must be 'fit' or null" });
   const d = updateDecision(String(req.params.id), { exemplar: ex });
   if (!d) return res.status(404).json({ error: "decision not found" });
   res.json({ decision: d });
 });
+
+/** Waiting profiles that just landed in the Ping tier without openers: draft them in the background, one at a time. */
+function draftMissing(changed: Decision[]): void {
+  const todo = changed.filter((d) => d.action === "recommend_ping" && !d.review && !d.applied && !d.pingDrafts?.length && d.profileText);
+  if (!todo.length) return;
+  void (async () => {
+    const settings = loadSettings();
+    for (const d of todo) {
+      if (drafting.has(d.id)) continue;
+      drafting.add(d.id);
+      try {
+        const screens = await screensOf(d, 3);
+        const r = await draftPings(
+          { name: d.name, age: d.age, profileText: d.profileText!, screens, evidence: d.classification?.evidence, pastPings: pastPingExamples(pastPings().filter((p) => p.id !== d.id)) },
+          settings,
+        );
+        const updated = updateDecision(d.id, { pingDrafts: r.drafts, draftsModel: settings.draftModel });
+        if (updated) broadcast("decision", updated);
+        swiper.log(`${d.name ?? "unknown"} moved into the Ping tier: drafted ${r.drafts.length} openers with ${settings.draftModel}.`);
+      } catch (e) {
+        swiper.log(`Drafting for ${d.name ?? "unknown"} failed: ${(e as Error).message}`);
+        if (e instanceof ContactedEliError) break; // the model asked to talk to Eli: stop, do not move on to the next one
+      } finally {
+        drafting.delete(d.id);
+      }
+    }
+  })();
+}
+swiper.on("retiered", (changed: Decision[]) => draftMissing(changed));
 app.post("/api/settings", (req, res) => {
   try {
-    res.json(updateSettings(req.body));
+    const before = loadSettings();
+    const after = updateSettings(req.body);
+    if (after.city !== before.city || after.latitude !== before.latitude || after.longitude !== before.longitude) {
+      if (swiper.state.device) void swiper.setLocation(after);
+    }
+    // New bars: re-tier every waiting profile from its existing scores (no model call), so the list moves right away.
+    const barsChanged = (["threshold", "pingThreshold", "fitLikePercentile", "fitPingPercentile", "pingEnabled"] as const).some((k) => after[k] !== before[k]);
+    if (barsChanged) {
+      const updated = retier(after);
+      for (const d of updated) broadcast("decision", d);
+      if (updated.length) swiper.log(`Thresholds changed: re-tiered ${updated.length} waiting profiles from their existing scores.`);
+      draftMissing(updated);
+    }
+    res.json(after);
   } catch (e) {
     res.status(400).json({ error: (e as Error).message });
   }
 });
-app.post("/api/start", async (_req, res) => {
-  void swiper.start();
+app.post("/api/start", async (req, res) => {
+  const mode = req.body?.mode === "send" ? "send" : "judge";
+  void swiper.start({ mode });
+  res.json({ ok: true });
+});
+/** Re-score waiting profiles from their saved text and screens under the current prompt and thresholds. Runs in the background. */
+let rescoring: { total: number; done: number; failed: number; startedAt: string } | null = null;
+let rescoreStop = false;
+app.get("/api/rescore", (_req, res) => res.json({ rescoring }));
+app.post("/api/rescore", (req, res) => {
+  if (rescoring) return res.status(409).json({ error: "already re-scoring", rescoring });
+  const explicit = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : null;
+  const all = readDecisions(100_000);
+  const ids = (explicit ? all.filter((d) => explicit.includes(d.id)) : all.filter((d) => !d.applied && (!d.review || d.review === "skip" || req.body?.includeReviewed)))
+    .filter((d) => d.profileText)
+    .map((d) => d.id);
+  if (!ids.length) return res.json({ ok: true, total: 0 });
+  const settings = loadSettings();
+  rescoring = { total: ids.length, done: 0, failed: 0, startedAt: new Date().toISOString() };
+  rescoreStop = false;
+  swiper.log(`Re-scoring ${ids.length} profiles with ${settings.model} from their saved text and screens…`);
+  void rescoreDecisions(
+    ids,
+    settings,
+    (m) => {
+      swiper.log(m);
+      if (rescoring) {
+        if (/^Re-scored /.test(m)) rescoring.done++;
+        if (/^Re-score failed/.test(m)) rescoring.failed++;
+      }
+    },
+    (d) => broadcast("decision", d),
+    () => rescoreStop,
+  )
+    .then((r) => {
+      swiper.log(`Re-scoring finished: ${r.done} re-scored${r.failed ? `, ${r.failed} failed` : ""}.`);
+      // Percentiles depend on the whole pool, so settle them once every score is in.
+      const settled = retier(loadSettings());
+      for (const d of settled) broadcast("decision", d);
+      draftMissing(settled);
+    })
+    .catch((e) => swiper.log(`Re-scoring stopped: ${(e as Error).message}`))
+    .finally(() => {
+      rescoring = null;
+    });
+  res.json({ ok: true, total: ids.length });
+});
+app.post("/api/rescore/stop", (_req, res) => {
+  rescoreStop = true;
   res.json({ ok: true });
 });
 app.post("/api/stop", async (_req, res) => {
@@ -287,6 +425,14 @@ server.listen(port, "127.0.0.1", () => {
   const url = `http://localhost:${port}`;
   console.log(`Dashboard: ${url}`);
   if (process.platform === "darwin" && !process.env.NO_OPEN) exec(`open ${url}`);
+  // Percentiles and tiers depend on the whole pool and the current bars: settle them at startup.
+  try {
+    const settled = retier(loadSettings());
+    if (settled.length) swiper.log(`Re-tiered ${settled.length} waiting profiles against the current pool and bars.`);
+    draftMissing(settled);
+  } catch (e) {
+    swiper.log(`Could not re-tier at startup: ${(e as Error).message}`);
+  }
   // Bring the phone up in the background so the panel is live when the page opens.
   void swiper.ensureDevice().then((ok) => (ok ? wizard.refresh() : undefined));
 });

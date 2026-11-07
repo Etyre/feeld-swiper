@@ -1,13 +1,26 @@
 const $ = (id) => document.getElementById(id);
-const fields = ["threshold", "pingEnabled", "pingThreshold", "pingPersona", "draftModel", "intellectualEnabled", "prior", "batchMinMinutes", "batchMaxMinutes", "continuous", "breakMinMinutes", "breakMaxMinutes", "activeStartHour", "activeEndHour", "maxProfilesPerBatch", "minDelayMs", "maxDelayMs", "humanize", "quickPassBelow", "maxScreens", "maxProfileScrolls", "advanceGesture", "model", "effort", "captureReasoning", "userGuidance", "avdName", "emulatorWindow", "stopEmulatorOnExit", "deviceSerial"];
-const boolFields = new Set(["pingEnabled", "humanize", "continuous", "captureReasoning", "intellectualEnabled", "emulatorWindow", "stopEmulatorOnExit"]);
+const fields = ["threshold", "pingEnabled", "pingThreshold", "pingPersona", "draftModel", "dateMePage", "fitLikePercentile", "fitPingPercentile", "prior", "batchMinMinutes", "batchMaxMinutes", "continuous", "breakMinMinutes", "breakMaxMinutes", "activeStartHour", "activeEndHour", "maxProfilesPerBatch", "minDelayMs", "maxDelayMs", "humanize", "quickPassBelow", "maxScreens", "maxProfileScrolls", "advanceGesture", "model", "effort", "captureReasoning", "backend", "agentSdkAuth", "userGuidance", "avdName", "emulatorWindow", "stopEmulatorOnExit", "deviceSerial", "city", "latitude", "longitude"];
+const boolFields = new Set(["pingEnabled", "humanize", "continuous", "captureReasoning", "emulatorWindow", "stopEmulatorOnExit"]);
 let settings = {};
 let state = { status: "idle", current: null };
 let setup = { step: "idle", busy: false, message: "", googleAccount: null, feeldInstalled: false };
 const decisionsById = new Map();
 const cardEls = new Map(); // Live tab "Recent"
-const noteDrafts = new Map(); // unsaved note text by decision id, survives card rebuilds
-const ownDrafts = new Map(); // unsent "write my own" ping text by decision id
+// Drafts are never lost: anything typed into a text box is mirrored to localStorage as you type, keyed by
+// field and the record it belongs to, and put back before the box is shown. Cleared only when the text is
+// successfully submitted. localStorage can be missing or full (private window), so every access is guarded.
+const draftStore = {
+  key: (field, id = "") => `feeld:draft:${field}:${id}`,
+  get(field, id) { try { const v = localStorage.getItem(this.key(field, id)); return v == null ? undefined : JSON.parse(v); } catch { return undefined; } },
+  set(field, id, value) { try { localStorage.setItem(this.key(field, id), JSON.stringify(value)); } catch {} },
+  clear(field, id) { try { localStorage.removeItem(this.key(field, id)); } catch {} },
+  /** A one-off text box: restore its saved text now and keep saving as it changes. */
+  bind(el, field) { const saved = this.get(field, ""); if (typeof saved === "string" && !el.value) el.value = saved; el.addEventListener("input", () => this.set(field, "", el.value)); },
+};
+// Map-like views over draftStore, keyed by decision id.
+const persistedDrafts = (field) => ({ get: (id) => draftStore.get(field, id), set: (id, v) => draftStore.set(field, id, v), delete: (id) => draftStore.clear(field, id), has: (id) => draftStore.get(field, id) !== undefined });
+const noteDrafts = persistedDrafts("note"); // unsaved note text by decision id, survives card rebuilds and reloads
+const ownDrafts = persistedDrafts("ping"); // unsent ping text by decision id ({ text, idx })
 const pingOpen = new Set(); // decision ids whose ping picker is open
 const reviewCards = new Map(); // decision id -> { el, ref } in the History tab
 const queueCards = new Map(); // decision id -> { el, ref } in the To review tab
@@ -30,7 +43,7 @@ function keepScroll(update) {
     if (Math.abs(delta) > 1) window.scrollBy(0, delta);
   }
 }
-const modelNames = { "claude-opus-5": "Claude Opus 5", "claude-sonnet-5": "Claude Sonnet 5", "claude-haiku-4-5": "Claude Haiku 4.5", "claude-opus-4-8": "Claude Opus 4.8", "claude-fable-5-1": "Claude Fable 5.1" };
+const modelNames = { "claude-opus-5-5": "Claude Opus 5.5", "claude-sonnet-5-5": "Claude Sonnet 5.5", "claude-haiku-5-5": "Claude Haiku 5.5", "claude-opus-5": "Claude Opus 5", "claude-sonnet-5": "Claude Sonnet 5", "claude-haiku-4-5": "Claude Haiku 4.5", "claude-opus-4-8": "Claude Opus 4.8", "claude-fable-5-1": "Claude Fable 5.1" };
 const hasEffort = (model) => !/haiku/i.test(model || "");
 function modelLabel(d) {
   if (!d.model) return "model not recorded";
@@ -52,6 +65,19 @@ function fmtRatio(lr) {
 }
 const recommendationOf = (d) => (d.action === "recommend_ping" ? "ping" : d.action === "recommend_like" ? "like" : d.action === "recommend_pass" ? "pass" : null);
 const isPending = (d) => !d.review && !d.applied;
+// Ranking for the To review tab: pings, then likes, then passes; within a tier, the model's best case for the profile.
+const TIERS = { recommend_ping: { rank: 3, title: "Ping", blurb: "Probably veg*n, a strong fit, or both. Edit the draft, then queue it." }, recommend_like: { rank: 2, title: "Like", blurb: "Clears a like bar on diet or fit, not a ping bar. Upgrade any of them to a ping." }, recommend_pass: { rank: 1, title: "Pass", blurb: "Below both bars. Rescue any you disagree with." }, skipped: { rank: 0, title: "Not scored", blurb: "The model could not score these." } };
+const tierOf = (d) => TIERS[d.action] ?? TIERS.skipped;
+/** Fit as a 0-1 number for sorting and filtering: the pool percentile when known, else the raw score. */
+const fitOf = (d) => (typeof d.fitPercentile === "number" ? d.fitPercentile / 100 : typeof d.classification?.fit_probability === "number" ? d.classification.fit_probability : null);
+const ordinal = (n) => { const s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
+/** Ranking within a tier: clears both the diet and fit bars first, then the two scores combined. */
+const scoreOf = (d) => {
+  const c = d.classification; if (!c) return -1;
+  const p = c.probability ?? 0, f = fitOf(d) ?? 0;
+  const both = d.likedFor === "both" ? 2 : 0;
+  return both + p + f;
+};
 const actionWord = { like: "Liked", ping: "Pinged", pass: "Passed" };
 
 async function api(method, path, body) {
@@ -70,22 +96,35 @@ function renderSettingsDerived() {
   $("effortHint").textContent = effortOk ? "" : "Haiku 4.5 has no effort control.";
   $("quickPassVal").textContent = fmtP(parseFloat($("quickPassBelow").value));
   $("pingVal").textContent = fmtP(parseFloat($("pingThreshold").value));
-  $("pingOpts").hidden = $("pingEnabled").value !== "true";
+  const pct = (id) => { const v = parseInt($(id).value, 10); return `${v} (top ${100 - v}%)`; };
+  $("fitVal").textContent = pct("fitLikePercentile");
+  $("fitPingVal").textContent = pct("fitPingPercentile");
+  const pingsOff = $("pingEnabled").value !== "true";
+  $("pingOpts").hidden = pingsOff;
+  document.querySelectorAll(".pingbar").forEach((el) => { el.hidden = pingsOff; });
   $("continuousOpts").hidden = $("continuous").value !== "true";
 }
 function fillSettings(s) {
   settings = s;
-  for (const f of fields) $(f).value = String(s[f]);
+  // Never overwrite the box being edited: an auto-save response can land while you're still typing.
+  for (const f of fields) if ($(f) !== document.activeElement) $(f).value = s[f] == null ? "" : String(s[f]);
+  $("customCoords").hidden = s.city !== "custom";
+  $("agentSdkOpts").hidden = s.backend !== "agent-sdk";
   renderSettingsDerived();
 }
-async function saveSettings() {
+$("city").addEventListener("input", () => { $("customCoords").hidden = $("city").value !== "custom"; });
+$("backend").addEventListener("input", () => { $("agentSdkOpts").hidden = $("backend").value !== "agent-sdk"; });
+async function saveSettings(leaving = false) {
   const patch = {};
   for (const f of fields) {
     const el = $(f);
     if (boolFields.has(f)) patch[f] = el.value === "true";
-    else patch[f] = el.type === "number" || el.type === "range" ? parseFloat(el.value) : el.value;
+    else if (el.type === "number" || el.type === "range") patch[f] = el.value === "" ? null : parseFloat(el.value);
+    else patch[f] = el.value;
   }
-  const res = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+  // keepalive lets the request finish after the tab closes (settings are the draft store for these boxes).
+  const res = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch), keepalive: leaving });
+  if (leaving) return;
   const body = await res.json();
   if (res.ok) { fillSettings(body); $("saveMsg").textContent = "Saved."; }
   else $("saveMsg").textContent = "Error: " + body.error;
@@ -113,7 +152,10 @@ function renderBatchText() {
   const el = $("batchText");
   if (s.batch && ["running", "booting", "awaiting_login"].includes(s.status)) {
     const left = Math.max(0, Math.round((new Date(s.batch.endsAt) - Date.now()) / 60000));
-    el.textContent = `· ${s.batch.plannedMinutes}-min batch, ${left} min left, ${s.batch.evaluated} judged, ${s.batch.applied} done`;
+    el.textContent =
+      s.batch.mode === "send"
+        ? `· SEND batch: ${s.batch.applied} reviews sent, ${s.batch.evaluated} new judged, up to ${left} min more`
+        : `· JUDGING batch: ${s.batch.plannedMinutes} min, ${left} left, ${s.batch.evaluated} judged, ${s.batch.applied} reviews sent`;
   } else if (s.status === "waiting" && s.nextBatchAt) {
     el.textContent = `· next batch ${new Date(s.nextBatchAt).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}`;
   } else if (s.lastBatchEnd) {
@@ -163,14 +205,22 @@ function fillClassification(root, d) {
       a.textContent = `arith ${fmtP(c.arithmetic_probability)}`;
       bars[0].appendChild(a);
     }
-    if (c.intellectual_exception) {
-      const lf = document.createElement("span"); lf.className = "badge likedfor"; lf.textContent = "🧠 intellectual exception";
-      badge.after(lf);
+    const fit = fitOf(d);
+    if (fit === null) bars[1].remove();
+    else {
+      bars[1].querySelector(".fill").style.width = fmtP(fit);
+      const likeBar = typeof d.fitLikePercentile === "number" ? d.fitLikePercentile : settings.fitLikePercentile ?? 80;
+      bars[1].querySelector(".thresh").style.left = `${likeBar}%`;
+      const pv = bars[1].querySelector(".pval");
+      pv.textContent = typeof d.fitPercentile === "number" ? ordinal(d.fitPercentile) : fmtP(fit);
+      pv.title = typeof d.fitPercentile === "number" ? `Fit percentile ${d.fitPercentile}: a better fit than ${d.fitPercentile}% of profiles scored so far (raw score ${fmtP(c.fit_probability)})` : "Raw fit score; no percentile yet";
+      const fpt = typeof d.fitPingPercentile === "number" ? d.fitPingPercentile : typeof d.pingThreshold === "number" ? settings.fitPingPercentile : null;
+      if (typeof fpt === "number") { const t = bars[1].querySelector(".thresh.super"); t.style.left = `${fpt}%`; t.hidden = false; }
     }
-    if (typeof c.intellectual_probability === "number") {
-      const ip = document.createElement("span"); ip.className = "intp"; ip.title = "Model's probability that you'd consider them eligible for the intellectual exception";
-      ip.textContent = `🧠 ${fmtP(c.intellectual_probability)}`;
-      root.querySelector(".model").appendChild(ip);
+    if (d.likedFor) {
+      const lf = document.createElement("span"); lf.className = "badge likedfor " + d.likedFor;
+      lf.textContent = d.likedFor === "both" ? "diet + fit" : d.likedFor === "veg" ? "for diet" : d.likedFor === "fit" ? "for fit" : "🧠 intellectual exception";
+      badge.after(lf);
     }
     root.querySelector(".diet").textContent = c.dietary_badge ? `Dietary tag: ${c.dietary_badge}` : "No dietary tag shown";
     root.querySelector(".modelchip").textContent = modelLabel(d);
@@ -180,11 +230,12 @@ function fillClassification(root, d) {
     else stage.textContent = "";
     const ul = root.querySelector(".evidence");
     ul.innerHTML = "";
-    for (const e of c.evidence) {
+    const ev = [...c.evidence].sort((a, b) => (a.criterion === "fit") - (b.criterion === "fit"));
+    for (const e of ev) {
       const li = document.createElement("li");
-      li.className = e.direction;
+      li.className = e.direction + (e.criterion === "fit" ? " fitev" : "");
       li.textContent = `${e.criterion === "intellectual" ? "🧠 " : ""}${e.observation}`;
-      if (e.criterion !== "intellectual") {
+      if (e.criterion === "veg") {
         const lr = document.createElement("span"); lr.className = "lr"; lr.textContent = `LR ${fmtRatio(e.likelihood_ratio)}`; li.appendChild(lr);
       }
       ul.appendChild(li);
@@ -192,7 +243,7 @@ function fillClassification(root, d) {
     if (c.reasoning) root.querySelector(".reasoning").textContent = c.reasoning;
     else root.querySelector(".reasoning")?.closest("details")?.remove();
   } else {
-    root.querySelector(".prob")?.remove();
+    root.querySelectorAll(".prob").forEach((b) => b.remove());
     root.querySelector(".reasoning")?.closest("details")?.remove();
     root.querySelector(".diet").innerHTML = `<span class="error">${d.error ?? "Not classified"}</span>`;
     root.querySelector(".model")?.remove();
@@ -231,8 +282,8 @@ function fillPhotos(root, d, limit, full = false) {
 }
 
 // ---------- review: like / ping / pass / leave it ----------
-async function sendReview(id, choice, message) {
-  const res = await fetch(`/api/decisions/${id}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ choice, message }) });
+async function sendReview(id, choice, message, draftIndex = null) {
+  const res = await fetch(`/api/decisions/${id}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ choice, message, draftIndex }) });
   const body = await res.json();
   if (!res.ok) { appendLog({ at: new Date().toISOString(), message: "Review rejected: " + body.error }); return null; }
   setStats(body.stats);
@@ -281,9 +332,21 @@ function fillReviewBar(root, d) {
   const hint = box.querySelector(".pinghint");
   const radioName = `ping-${d.id}`;
   own.name = radioName;
-  ownText.value = ownDrafts.get(d.id) ?? "";
-  ownText.oninput = () => { ownDrafts.set(d.id, ownText.value); own.checked = true; };
-  ownText.onfocus = () => { own.checked = true; };
+  // The textarea is the message that will be sent. Picking a draft copies it in; you edit from there.
+  const pending = ownDrafts.get(d.id);
+  ownText.value = pending?.text ?? "";
+  const counter = box.querySelector(".chars");
+  const count = () => { if (counter) counter.textContent = `${ownText.value.length}/280`; };
+  count();
+  ownText.oninput = () => { const sel = box.querySelector(`input[name="${radioName}"]:checked`); ownDrafts.set(d.id, { text: ownText.value, idx: sel && sel.value !== "own" ? +sel.value : null }); count(); };
+  box.onchange = (ev) => {
+    if (ev.target.name !== radioName) return;
+    const c = cur();
+    if (ev.target.value === "own") { ownText.value = ""; ownText.focus(); }
+    else ownText.value = (c.pingDrafts ?? [])[+ev.target.value]?.text ?? "";
+    ownDrafts.set(d.id, { text: ownText.value, idx: ev.target.value === "own" ? null : +ev.target.value });
+    count();
+  };
   const renderDrafts = () => {
     const c = cur();
     drafts.innerHTML = "";
@@ -297,14 +360,15 @@ function fillReviewBar(root, d) {
       lab.append(r, t);
       drafts.appendChild(lab);
     });
-    // Preselect: the message already chosen, else the first draft, else your own.
-    const chosen = c.pingMessage ? list.findIndex((x) => x.text === c.pingMessage) : -1;
+    // Preselect: an unsent edit in progress, else the message already queued, else the first draft, else your own.
     const radios = box.querySelectorAll(`input[name="${radioName}"]`);
-    if (chosen >= 0) radios[chosen].checked = true;
-    else if (c.pingMessage) { own.checked = true; if (!ownText.value) ownText.value = c.pingMessage; }
-    else if (list.length) radios[0].checked = true;
+    const saved = ownDrafts.get(d.id);
+    if (saved) { (saved.idx != null && radios[saved.idx] ? radios[saved.idx] : own).checked = true; ownText.value = saved.text; }
+    else if (c.pingMessage) { const i = typeof c.pingDraftIndex === "number" ? c.pingDraftIndex : list.findIndex((x) => x.text === c.pingMessage); (i >= 0 && radios[i] ? radios[i] : own).checked = true; ownText.value = c.pingMessage; }
+    else if (list.length) { radios[0].checked = true; ownText.value = list[0].text; }
     else own.checked = true;
-    hint.textContent = list.length ? `Drafted by ${modelNames[c.draftsModel] ?? c.draftsModel ?? "the drafting model"}.` : "No drafts yet.";
+    count();
+    hint.textContent = list.length ? `Drafted by ${modelNames[c.draftsModel] ?? c.draftsModel ?? "the drafting model"}. Edit freely; your edits teach the drafter.` : "No drafts yet.";
   };
   let draftingNow = false;
   const fetchDrafts = async () => {
@@ -335,13 +399,14 @@ function fillReviewBar(root, d) {
   box.querySelector(".queueping").onclick = async () => {
     const c = cur();
     const sel = box.querySelector(`input[name="${radioName}"]:checked`);
-    const message = !sel || sel.value === "own" ? ownText.value.trim() : (c.pingDrafts ?? [])[+sel.value]?.text ?? "";
+    const message = ownText.value.trim();
+    const draftIndex = sel && sel.value !== "own" && (c.pingDrafts ?? [])[+sel.value] ? +sel.value : null;
     if (!message) { hint.textContent = "Pick a draft or write a message first."; ownText.focus(); return; }
     box.querySelector(".queueping").disabled = true;
-    const ok = await sendReview(d.id, "ping", message);
+    const ok = await sendReview(d.id, "ping", message, draftIndex);
     if (!ok) box.querySelector(".queueping").disabled = false;
   };
-  if (pingOpen.has(d.id)) openPingBox();
+  if (pingOpen.has(d.id) || (d.action === "recommend_ping" && isPending(d) && (d.pingDrafts ?? []).length)) openPingBox();
 }
 
 // ---------- current profile (live) ----------
@@ -368,42 +433,49 @@ function buildCard(d) {
   fillClassification(tpl, d);
   fillPhotos(tpl, d, 3);
   fillReviewBar(tpl, d);
-  const vlabel = tpl.querySelector(".vlabel");
-  vlabel.textContent = "Grade the model:";
-  const vbtns = tpl.querySelectorAll(".vbtn:not(.exemplar)");
-  const range = tpl.querySelector(".userpRange");
-  const paint = (v, up) => {
-    vbtns.forEach((b) => b.classList.toggle("on", b.dataset.v === v));
-    range.value = typeof up === "number" ? Math.round(up * 100) : "";
+  // Two independent grades: the diet call (a probability, estimate stored 0-1) and the fit call (a percentile, stored 0-100).
+  // Each row's estimate box also sets its grade: more than 10 points off the model's number counts as higher/lower.
+  const grades = [
+    { vKey: "verdict", eKey: "userProbability", btns: tpl.querySelectorAll('.vbtns[data-score="veg"] .vbtn'), range: tpl.querySelector(".userpRange"), toBox: (e) => Math.round(e * 100), fromBox: (n) => n / 100, modelPts: () => (typeof d.classification?.probability === "number" ? d.classification.probability * 100 : null) },
+    { vKey: "fitVerdict", eKey: "userFitPercentile", btns: tpl.querySelectorAll('.vbtns[data-score="fit"] .vbtn'), range: tpl.querySelector(".userfitRange"), toBox: (e) => Math.round(e), fromBox: (n) => Math.round(n), modelPts: () => (typeof d.fitPercentile === "number" ? d.fitPercentile : typeof d.classification?.fit_probability === "number" ? d.classification.fit_probability * 100 : null) },
+  ];
+  const paint = () => {
+    const cur = decisionsById.get(d.id) ?? d;
+    for (const g of grades) {
+      const v = cur[g.vKey] ?? null, e = cur[g.eKey];
+      g.btns.forEach((b) => b.classList.toggle("on", b.dataset.v === v));
+      g.range.value = typeof e === "number" ? g.toBox(e) : "";
+    }
   };
-  paint(d.verdict ?? null, d.userProbability);
-  const send = async (verdict, userProbability) => {
-    const res = await fetch(`/api/decisions/${d.id}/verdict`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verdict, userProbability }) });
+  paint();
+  const send = async (patch) => {
+    const res = await fetch(`/api/decisions/${d.id}/verdict`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
     if (res.ok) {
       const body = await res.json();
       const cur = decisionsById.get(d.id) ?? d;
-      cur.verdict = body.decision.verdict; cur.userProbability = body.decision.userProbability;
-      paint(cur.verdict ?? null, cur.userProbability); setStats(body.stats);
+      for (const k of ["verdict", "userProbability", "fitVerdict", "userFitPercentile"]) cur[k] = body.decision[k];
+      paint(); setStats(body.stats);
     }
   };
-  vbtns.forEach((b) => {
-    b.onclick = () => send(b.classList.contains("on") ? null : b.dataset.v, b.classList.contains("on") ? null : undefined);
-  });
+  for (const g of grades) {
+    // Clicking the lit button clears that grade and its estimate; another button changes the grade and keeps the estimate.
+    g.btns.forEach((b) => { b.onclick = () => send(b.classList.contains("on") ? { [g.vKey]: null, [g.eKey]: null } : { [g.vKey]: b.dataset.v }); });
+    g.range.onchange = () => {
+      if (g.range.value === "") { send({ [g.vKey]: null, [g.eKey]: null }); return; }
+      const n = Math.min(100, Math.max(0, parseFloat(g.range.value)));
+      const m = g.modelPts();
+      const v = m === null ? null : n > m + 10 ? "higher" : n < m - 10 ? "lower" : "about_right";
+      send({ [g.vKey]: v, [g.eKey]: g.fromBox(n) });
+    };
+    g.range.onkeydown = (e) => { if (e.key === "Enter") g.range.blur(); };
+  }
   const exBtn = tpl.querySelector(".vbtn.exemplar");
-  exBtn.classList.toggle("on", d.exemplar === "intellectual");
+  exBtn.classList.toggle("on", !!d.exemplar);
   exBtn.onclick = async () => {
-    const next = exBtn.classList.contains("on") ? null : "intellectual";
+    const next = exBtn.classList.contains("on") ? null : "fit";
     const res = await fetch(`/api/decisions/${d.id}/exemplar`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ exemplar: next }) });
-    if (res.ok) { const body = await res.json(); const cur = decisionsById.get(d.id) ?? d; cur.exemplar = body.decision.exemplar; exBtn.classList.toggle("on", cur.exemplar === "intellectual"); }
+    if (res.ok) { const body = await res.json(); const cur = decisionsById.get(d.id) ?? d; cur.exemplar = body.decision.exemplar; exBtn.classList.toggle("on", !!cur.exemplar); }
   };
-  range.onchange = () => {
-    if (range.value === "") { send(null, null); return; }
-    const up = Math.min(100, Math.max(0, parseFloat(range.value))) / 100;
-    const p = d.classification?.probability;
-    const verdict = p === undefined ? null : up > p + 0.1 ? "higher" : up < p - 0.1 ? "lower" : "about_right";
-    send(verdict, up);
-  };
-  range.onkeydown = (e) => { if (e.key === "Enter") range.blur(); };
   const note = tpl.querySelector(".note");
   note.value = noteDrafts.get(d.id) ?? d.note ?? "";
   let noteTimer = null;
@@ -423,11 +495,81 @@ function buildCard(d) {
   note.oninput = () => { noteDrafts.set(d.id, note.value); clearTimeout(noteTimer); noteTimer = setTimeout(saveNote, 800); };
   note.onblur = () => { clearTimeout(noteTimer); saveNote(); };
   if (!d.classification) { tpl.querySelector(".verdict").remove(); note.remove(); }
-  tpl.querySelector(".ptext").textContent = d.profileText || "(no profile text captured)";
+  renderProfileText(tpl.querySelector(".ptext"), d.profileText);
+  // Likes and pings show the whole profile open; passes keep it folded.
+  if (d.action === "recommend_like" || d.action === "recommend_ping") { const box = tpl.querySelector(".ptextBox"); box.open = true; box.classList.add("open-by-default"); }
   const u = d.usage ? ` · ${d.usage.input + d.usage.cacheRead} in / ${d.usage.output} out tokens` : "";
   tpl.querySelector(".meta").textContent = `${new Date(d.at).toLocaleString()} · threshold ${fmtP(d.threshold)}${u}`;
   return tpl.querySelector("article");
 }
+
+/**
+ * The profile text as read from the app, formatted: the header lines, the bio as paragraphs, and the
+ * Desires / Interests tag lists as chips.
+ */
+function renderProfileText(el, text) {
+  el.innerHTML = "";
+  if (!text) { el.textContent = "(no profile text captured)"; return; }
+  const lines = text.split("\n").map((l) => l.replace(/\uFFFC/g, " · ").trimEnd());
+  const isHead = (l) => /^(desires|interests|looking for|about|prompts?|languages?|hidden bio\.?( tap to reveal)?)$/i.test(l.trim());
+  const skip = (l) => /^(tap to reveal|hidden bio|\d+ shared|active today|block or report)$/i.test(l.trim()) || l.trim() === "";
+  let section = null; // current chips container
+  let i = 0;
+  // Header lines: everything up to the first long line (the bio) is name / age / distance / shared desires.
+  const meta = [];
+  while (i < lines.length && lines[i].length < 60 && !isHead(lines[i])) { if (!skip(lines[i])) meta.push(lines[i].trim()); i++; }
+  if (meta.length) { const m = document.createElement("div"); m.className = "pmeta"; m.textContent = meta.join(" · "); el.appendChild(m); }
+  for (; i < lines.length; i++) {
+    const l = lines[i];
+    if (isHead(l)) {
+      const h = document.createElement("div"); h.className = "phead"; h.textContent = l.trim().replace(/\.$/, ""); el.appendChild(h);
+      section = /^(desires|interests)$/i.test(l.trim()) ? document.createElement("div") : null;
+      if (section) { section.className = "chips"; el.appendChild(section); }
+      continue;
+    }
+    if (skip(l)) continue;
+    if (section && l.length < 40) {
+      const c = document.createElement("span"); c.className = "chip"; c.textContent = l.trim(); section.appendChild(c);
+      continue;
+    }
+    section = null;
+    // A bio node can hold several paragraphs; keep them.
+    const p = document.createElement("p"); p.className = "pline"; p.textContent = l; el.appendChild(p);
+  }
+}
+
+/** "Pass on everyone below this" under a card in the ranked list: a two-click control, confirmed inline. */
+function cutLine(rowsBelow) {
+  const wrap = document.createElement("div"); wrap.className = "cutline";
+  const btn = document.createElement("button");
+  const targets = () => rowsBelow.filter(isPending);
+  const n = targets().length;
+  btn.textContent = n ? `Pass on everyone below this (${n})` : "Nothing below";
+  btn.disabled = !n;
+  let armed = false, timer = null;
+  btn.onclick = async () => {
+    const ids = targets().map((d) => d.id);
+    if (!armed) { armed = true; btn.classList.add("confirm"); btn.textContent = `Queue a pass on ${ids.length} profiles below? Click again to confirm`; timer = setTimeout(() => { armed = false; btn.classList.remove("confirm"); btn.textContent = `Pass on everyone below this (${ids.length})`; }, 5000); return; }
+    clearTimeout(timer); btn.disabled = true; btn.textContent = "Queuing passes…";
+    await bulkReview("pass", ids);
+  };
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+$("sendQueued").onclick = async () => {
+  const s = await (await fetch("/api/state")).json();
+  const q = s.stats?.queued ?? { like: 0, ping: 0, pass: 0 };
+  const n = q.like + q.ping + q.pass;
+  if (!n) { $("sendHint").textContent = "Nothing queued yet: review some profiles first."; return; }
+  $("sendHint").textContent = `Sending ${q.like} likes, ${q.ping} pings, ${q.pass} passes… watch the Phone panel and log.`;
+  const r = await api("POST", "/api/start", { mode: "send" });
+  if (r.error) $("sendHint").textContent = "Could not start: " + r.error;
+};
+$("rescoreBtn").onclick = async () => {
+  const r = await api("POST", "/api/rescore", {});
+  $("sendHint").textContent = r.error ? "Re-score: " + r.error : r.total ? `Re-scoring ${r.total} profiles in the background; cards update as they land.` : "Nothing to re-score.";
+};
 
 /** A decision arrived or changed: keep the maps and every list in step. `own` = caused by this dashboard. */
 function renderDecision(d, prepend, own = false) {
@@ -436,6 +578,8 @@ function renderDecision(d, prepend, own = false) {
     if (noteDrafts.has(d.id)) d.note = prev.note ?? d.note;
     if (prev.verdict !== undefined && d.verdict == null) d.verdict = prev.verdict;
     if (prev.userProbability != null && d.userProbability == null) d.userProbability = prev.userProbability;
+    if (prev.fitVerdict !== undefined && d.fitVerdict == null) d.fitVerdict = prev.fitVerdict;
+    if (prev.userFitPercentile != null && d.userFitPercentile == null) d.userFitPercentile = prev.userFitPercentile;
   }
   decisionsById.set(d.id, d);
   const existing = cardEls.get(d.id);
@@ -476,8 +620,8 @@ function assignBatches(all) {
   for (const d of sorted) { const g = groups.get(d._batch) ?? { id: d._batch, start: d.at, n: 0 }; g.n++; groups.set(d._batch, g); }
   return [...groups.values()].sort((a, b) => (a.start < b.start ? 1 : -1));
 }
-function refreshBatchOptions(groups) {
-  const sel = $("fBatch"); const cur = sel.value;
+function refreshBatchOptions(groups, sel = $("fBatch")) {
+  const cur = sel.value;
   const label = (g) => `${fmtTime(g.start)} · ${g.n} profiles${g.id.startsWith("~") ? " (grouped by time)" : ""}`;
   const wanted = ["all", ...groups.map((g) => g.id)];
   if ([...sel.options].map((o) => o.value).join("|") !== wanted.join("|")) {
@@ -486,13 +630,10 @@ function refreshBatchOptions(groups) {
   }
 }
 function sortRows(rows, how) {
-  const intOf = (d) => d.classification?.intellectual_probability ?? -1;
   rows.sort((a, b) => {
+    if (how === "rank") return tierOf(b).rank - tierOf(a).rank || scoreOf(b) - scoreOf(a) || (b.at > a.at ? 1 : -1);
     if (how === "prob") return (b.classification?.probability ?? -1) - (a.classification?.probability ?? -1) || (b.at > a.at ? 1 : -1);
-    if (how === "int") {
-      const rank = (d) => (d.exemplar === "intellectual" ? 2 : d.classification?.intellectual_exception ? 1 : 0);
-      return rank(b) - rank(a) || intOf(b) - intOf(a) || (b.at > a.at ? 1 : -1);
-    }
+    if (how === "fit") return (fitOf(b) ?? -1) - (fitOf(a) ?? -1) || (b.at > a.at ? 1 : -1);
     if (how === "oldest") return a.at < b.at ? -1 : 1;
     if (how === "near") return (distanceOf(a) ?? 9999) - (distanceOf(b) ?? 9999) || (b.at > a.at ? 1 : -1);
     return a.at < b.at ? 1 : -1;
@@ -500,12 +641,22 @@ function sortRows(rows, how) {
 }
 const PAGE = 40;
 /** Render `rows` into `list`, reusing cards whose decision object hasn't changed. */
-function paintList(list, cards, rows, limitRef, onMore) {
+function paintList(list, cards, rows, limitRef, onMore, groupOf = null) {
   const shown = rows.slice(0, limitRef.n);
   keepScroll(() => {
     const keep = new Set(shown.map((d) => d.id));
     for (const [id, entry] of cards) if (!keep.has(id)) { entry.el.remove(); cards.delete(id); }
-    for (const d of shown) {
+    list.querySelectorAll(".tierhead, .cutline").forEach((h) => h.remove());
+    let lastGroup = null;
+    for (const [idx, d] of shown.entries()) {
+      const g = groupOf ? groupOf(d) : null;
+      if (g && g.title !== lastGroup) {
+        lastGroup = g.title;
+        const n = rows.filter((x) => groupOf(x).title === g.title).length;
+        const h = document.createElement("div"); h.className = "tierhead " + (d.action ?? "");
+        h.innerHTML = `<b>${g.title}</b> <span class="count">${n}</span><span class="blurb">${g.blurb}</span>`;
+        list.appendChild(h);
+      }
       let entry = cards.get(d.id);
       if (!entry || entry.ref !== d) {
         if (entry) entry.el.remove();
@@ -513,6 +664,7 @@ function paintList(list, cards, rows, limitRef, onMore) {
         cards.set(d.id, entry);
       }
       list.appendChild(entry.el);
+      if (groupOf) list.appendChild(cutLine(rows.slice(idx + 1)));
     }
     list.querySelector(".empty")?.remove();
     if (rows.length > limitRef.n) {
@@ -546,7 +698,9 @@ let queueVisible = [];
 function renderQueue(userInitiated = true) {
   const list = $("queueList");
   const all = Array.from(decisionsById.values());
-  const pending = all.filter(isPending);
+  refreshBatchOptions(assignBatches(all), $("qBatch"));
+  const qBatch = $("qBatch").value;
+  const pending = all.filter(isPending).filter((d) => qBatch === "all" || d._batch === qBatch);
   $("queueCount").textContent = pending.length ? `(${pending.length})` : "";
   if (deferIfScrolled($("tab-queue"), list, $("queuePending"), queuePendingN, userInitiated)) return;
   const show = $("qShow").value;
@@ -554,11 +708,13 @@ function renderQueue(userInitiated = true) {
     if (show === "like") return d.action === "recommend_like" || d.action === "recommend_ping";
     if (show === "ping") return d.action === "recommend_ping";
     if (show === "pass") return d.action === "recommend_pass";
-    if (show === "exception") return !!d.classification?.intellectual_exception;
+    if (show === "fit") return d.likedFor === "fit" || d.likedFor === "both";
+    if (show === "veg") return d.likedFor === "veg" || d.likedFor === "both";
     if (show === "skipped") return d.action === "skipped";
     return true;
   });
-  sortRows(rows, $("qSort").value);
+  const how = $("qSort").value;
+  sortRows(rows, how);
   queueVisible = rows;
   const nPass = rows.filter((d) => d.action === "recommend_pass").length;
   const nLike = rows.filter((d) => d.action === "recommend_like" || d.action === "recommend_ping").length;
@@ -569,7 +725,7 @@ function renderQueue(userInitiated = true) {
   $("queueSummary").textContent = pending.length
     ? `${rows.length} of ${pending.length} waiting shown · ${nLike} recommended like or ping, ${nPass} recommended pass`
     : "Nothing waiting for your review.";
-  paintList(list, queueCards, rows, queueLimit, () => renderQueue());
+  paintList(list, queueCards, rows, queueLimit, () => renderQueue(), how === "rank" ? tierOf : null);
 }
 async function bulkReview(choice, ids) {
   if (!ids.length) return;
@@ -582,7 +738,7 @@ async function bulkReview(choice, ids) {
 $("bulkPass").onclick = () => bulkReview("pass", queueVisible.filter((d) => d.action === "recommend_pass").map((d) => d.id));
 $("bulkSkip").onclick = () => bulkReview("skip", queueVisible.map((d) => d.id));
 $("queuePending").onclick = () => { window.scrollTo({ top: 0 }); renderQueue(true); };
-for (const id of ["qShow", "qSort"]) $(id).addEventListener("input", () => { queueLimit.n = PAGE; renderQueue(); });
+for (const id of ["qShow", "qSort", "qBatch"]) $(id).addEventListener("input", () => { queueLimit.n = PAGE; renderQueue(); });
 document.addEventListener("keydown", (e) => {
   if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
   if (document.activeElement === $("phone")) return; // keys go to the phone
@@ -607,20 +763,20 @@ function renderReview(userInitiated = true) {
   $("minPVal").textContent = fmtP(minP);
   const fAction = $("fAction").value, fSwipe = $("fSwipe").value, fSort = $("fSort").value, fVerdict = $("fVerdict").value;
   const which = $("minPWhich").value;
-  document.body.classList.toggle("show-intp", which === "int" || fSort === "int");
+  const vKey = $("fVerdictWhich").value === "fit" ? "fitVerdict" : "verdict";
   document.body.classList.toggle("show-arith", $("fProb").value === "both");
-  const scoreOf = (d) => (which === "int" ? d.classification?.intellectual_probability : d.classification?.probability);
+  const scoreOf = (d) => (which === "fit" ? fitOf(d) ?? undefined : d.classification?.probability);
   const rows = all.filter((d) => {
     if (fBatch !== "all" && d._batch !== fBatch) return false;
     const p = scoreOf(d);
     if (minP > 0 && (p === undefined || p < minP)) return false;
-    if (fVerdict === "ungraded" && d.verdict) return false;
-    if (["higher", "lower", "about_right"].includes(fVerdict) && d.verdict !== fVerdict) return false;
+    if (fVerdict === "ungraded" && d[vKey]) return false;
+    if (["higher", "lower", "about_right"].includes(fVerdict) && d[vKey] !== fVerdict) return false;
     if (fAction === "like" && d.action !== "recommend_like" && d.action !== "recommend_ping") return false;
     if (fAction === "ping" && d.action !== "recommend_ping") return false;
     if (fAction === "pass" && d.action !== "recommend_pass") return false;
     if (fAction === "skipped" && d.action !== "skipped") return false;
-    if (fAction === "exception" && !d.classification?.intellectual_exception) return false;
+    if (fAction === "fit" && d.likedFor !== "fit" && d.likedFor !== "both") return false;
     if (fSwipe === "none" && !isPending(d)) return false;
     if (["like", "ping", "pass", "skip"].includes(fSwipe) && d.review !== fSwipe && d.applied !== fSwipe) return false;
     if (fSwipe === "queued" && !(d.review && d.review !== "skip" && !d.applied)) return false;
@@ -644,7 +800,7 @@ window.addEventListener("scroll", () => {
   if (reviewPendingN.n && !$("tab-review").hidden) renderReview(true);
   if (queuePendingN.n && !$("tab-queue").hidden) renderQueue(true);
 }, { passive: true });
-for (const id of ["minP", "minPWhich", "fAction", "fSwipe", "fSort", "fVerdict", "fProb", "fBatch"]) $(id).addEventListener("input", () => { reviewLimit.n = PAGE; renderReview(); });
+for (const id of ["minP", "minPWhich", "fAction", "fSwipe", "fSort", "fVerdict", "fVerdictWhich", "fProb", "fBatch"]) $(id).addEventListener("input", () => { reviewLimit.n = PAGE; renderReview(); });
 
 // ---------- tabs ----------
 function showTab(name) {
@@ -696,7 +852,8 @@ phone.addEventListener("keydown", (ev) => {
 });
 phone.addEventListener("paste", (ev) => { const t = ev.clipboardData.getData("text"); if (t) wsSend({ type: "text", text: t }); ev.preventDefault(); });
 for (const b of document.querySelectorAll("[data-key]")) b.onclick = () => wsSend({ type: "key", key: b.dataset.key });
-$("sendText").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { wsSend({ type: "text", text: $("sendText").value }); $("sendText").value = ""; } });
+draftStore.bind($("sendText"), "sendText");
+$("sendText").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { wsSend({ type: "text", text: $("sendText").value }); $("sendText").value = ""; draftStore.clear("sendText", ""); } });
 function connectWs() {
   ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
   ws.binaryType = "blob";
@@ -731,13 +888,17 @@ $("setupRun").onclick = async () => {
   if (!email || !password) { $("setupMsg").hidden = false; $("setupMsg").className = "note err"; $("setupMsg").textContent = "Enter your Google email and password first."; return; }
   const r = await api("POST", "/api/setup/run", { email, password });
   if (r.error) appendLog({ at: new Date().toISOString(), message: "Setup: " + r.error });
-  $("gPass").value = "";
+  else draftStore.clear("gEmail", "");
+  $("gPass").value = ""; // the password is never saved anywhere
 };
+draftStore.bind($("gEmail"), "gEmail");
+draftStore.bind($("apkPaths"), "apkPaths");
 $("setupInstall").onclick = () => api("POST", "/api/setup/install");
 $("apkInstall").onclick = async () => {
   const files = $("apkPaths").value.split("\n").map((s) => s.trim()).filter(Boolean);
   const r = await api("POST", "/api/setup/apk", { files });
   appendLog({ at: new Date().toISOString(), message: r.error ? "APK install failed: " + r.error : "APK installed." });
+  if (!r.error) draftStore.clear("apkPaths", "");
 };
 for (const b of document.querySelectorAll("[data-action]")) b.onclick = async () => {
   b.disabled = true;
@@ -778,5 +939,17 @@ async function init() {
 $("startBtn").onclick = () => fetch("/api/start", { method: "POST" });
 $("stopBtn").onclick = () => fetch("/api/stop", { method: "POST" });
 $("saveBtn").onclick = saveSettings;
-for (const f of ["threshold", "prior", "continuous", "quickPassBelow", "model", "pingEnabled", "pingThreshold"]) $(f).addEventListener("input", renderSettingsDerived);
+for (const f of ["threshold", "prior", "continuous", "quickPassBelow", "model", "pingEnabled", "pingThreshold", "fitLikePercentile", "fitPingPercentile"]) $(f).addEventListener("input", renderSettingsDerived);
+// Auto-save: every setting saves itself. Sliders and selects on release/change, text boxes a moment after you stop typing.
+{
+  let timer = null;
+  const queueSave = (delay) => { clearTimeout(timer); timer = setTimeout(() => { $("saveMsg").textContent = "Saving…"; saveSettings(); }, delay); };
+  for (const f of fields) {
+    const el = $(f);
+    if (el.tagName === "TEXTAREA" || el.type === "text" || el.type === "number") el.addEventListener("input", () => queueSave(1200));
+    else el.addEventListener("change", () => queueSave(150));
+  }
+  // Closing or reloading the tab inside the debounce window must not lose what was just typed: flush the pending save.
+  window.addEventListener("pagehide", () => { if (timer) { clearTimeout(timer); timer = null; saveSettings(true); } });
+}
 init();

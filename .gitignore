@@ -1,5 +1,19 @@
+# dependencies and build output
 node_modules/
 dist/
+out/
+build/
+.venv/
+__pycache__/
+
+# secrets and personal config (.env.example is the committed template)
 .env
+.env.*
+!.env.example
+
+# runtime state: settings, decisions, screenshots, photos, logs (large and personal)
 data/
+*.log
+
+# OS and editor noise
 .DS_Store

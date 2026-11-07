@@ -1,11 +1,15 @@
 import { EventEmitter } from "node:events";
 import { AdbClient } from "./android.js";
-import { FeeldDriver, SELECTORS, jpegForModel } from "./feeld.js";
+import { FeeldDriver, SELECTORS, jpegForModel, hamming } from "./feeld.js";
+import type { UiNode } from "./android.js";
 import { bootEmulator, runningEmulatorFor, stopEmulator } from "./emulator.js";
-import { classifyProfile } from "./classifier.js";
-import { draftPings } from "./drafts.js";
-import { appendDecision, decisionsFor, queueSummary, updateDecision, type Action, type Decision } from "./store.js";
+import { classifyProfile, recommend } from "./classifier.js";
+import { backendLabel, ContactedEliError } from "./llm.js";
+import { draftPings, pastPingExamples } from "./drafts.js";
+import { appendDecision, decisionsFor, fitPercentileOf, fitPool, pastPings, queueSummary, recognitionCandidates, updateDecision, type Action, type Decision } from "./store.js";
+import { retier } from "./rescore.js";
 import { loadSettings, type Settings } from "./config.js";
+import { applyLocation } from "./location.js";
 
 export type Status = "idle" | "booting" | "setup_needed" | "awaiting_login" | "running" | "stopping" | "stopped" | "waiting" | "error";
 
@@ -15,8 +19,9 @@ export interface SwiperState {
   swipesThisSession: number;
   lastError: string | null;
   current: { name: string | null; fingerprint: string; doing: "reading" | "judging" | "drafting" | "applying" | "moving on" } | null;
-  /** The batch in progress: when it started, when it will end, how many profiles judged and how many reviews applied. */
-  batch: { id: string; startedAt: string; endsAt: string; plannedMinutes: number; evaluated: number; applied: number } | null;
+  /** The batch in progress: when it started, when it will end, how many profiles judged and how many reviews applied.
+   *  mode "send" ends as soon as every queued review has been delivered; new profiles are judged on the way, as in a judging batch. */
+  batch: { id: string; mode: "judge" | "send"; startedAt: string; endsAt: string; plannedMinutes: number; evaluated: number; applied: number; passedBy: number } | null;
   /** When the next batch is scheduled to start (continuous mode). */
   nextBatchAt: string | null;
   /** Why the last batch ended. */
@@ -157,8 +162,19 @@ export class Swiper extends EventEmitter {
     if (changed) {
       this.log(`Device: ${dev.serial}${dev.model ? ` (${dev.model})` : ""}${avd ? `, AVD "${avd}"` : ""}, screen ${this.client.size?.w}x${this.client.size?.h}`);
       this.emit("state", this.state);
+      await this.setLocation(settings);
     }
     return true;
+  }
+
+  /** Points the emulator's GPS at the city in Settings. */
+  async setLocation(settings: Settings = loadSettings()): Promise<void> {
+    try {
+      const msg = await applyLocation(this.client, settings);
+      if (msg) this.log(msg);
+    } catch (e) {
+      this.log(`Could not set the location: ${(e as Error).message}`);
+    }
   }
 
   /**
@@ -166,8 +182,9 @@ export class Swiper extends EventEmitter {
    * human-length session: profiles you've reviewed get your like / ping / pass when they
    * come up; new profiles are judged provisionally and browsed past without a vote.
    */
-  async start(): Promise<void> {
+  async start(opts: { mode?: "judge" | "send" } = {}): Promise<void> {
     if (this.loopPromise) return;
+    const mode = opts.mode ?? "judge";
     this.cancelSchedule();
     this.stopRequested = false;
     this.state.swipesThisSession = 0;
@@ -178,17 +195,31 @@ export class Swiper extends EventEmitter {
     const startedAt = new Date();
     this.state.batch = {
       id: startedAt.toISOString(),
+      mode,
       startedAt: startedAt.toISOString(),
       endsAt: new Date(startedAt.getTime() + minutes * 60_000).toISOString(),
       plannedMinutes: minutes,
       evaluated: 0,
       applied: 0,
+      passedBy: 0,
     };
     const q = queueSummary();
     const queued = q.like + q.ping + q.pass;
-    this.log(
-      `Starting a ${minutes}-minute batch. ${queued ? `Queued from your reviews: ${q.like} like${q.like === 1 ? "" : "s"}, ${q.ping} ping${q.ping === 1 ? "" : "s"}, ${q.pass} pass${q.pass === 1 ? "" : "es"}` : "Nothing queued from reviews"}; new profiles are judged and left for you to review${q.pending ? ` (${q.pending} already waiting)` : ""}.`,
-    );
+    const queuedText = `${q.like} like${q.like === 1 ? "" : "s"}, ${q.ping} ping${q.ping === 1 ? "" : "s"}, ${q.pass} pass${q.pass === 1 ? "" : "es"}`;
+    if (mode === "send") {
+      if (!queued) {
+        this.log("Nothing is queued from your reviews, so there is nothing to send.");
+        this.state.batch = null;
+        this.state.lastBatchEnd = "nothing queued to send.";
+        this.emit("state", this.state);
+        return;
+      }
+      this.log(`Send batch: delivering ${queuedText}. Browsing Discover until each reviewed profile comes up, judging new profiles on the way. Up to ${minutes} minutes.`);
+    } else {
+      this.log(
+        `Starting a ${minutes}-minute batch. ${queued ? `Queued from your reviews: ${queuedText}` : "Nothing queued from reviews"}; new profiles are judged and left for you to review${q.pending ? ` (${q.pending} already waiting)` : ""}.`,
+      );
+    }
     this.loopPromise = this.run()
       .finally(() => {
         this.loopPromise = null;
@@ -222,6 +253,15 @@ export class Swiper extends EventEmitter {
   private endBatch(reason: string): void {
     this.state.lastBatchEnd = reason;
     this.log(`Batch over: ${reason}`);
+    // The pool grew, so fit percentiles (and tiers) of the profiles still waiting move.
+    try {
+      const changed = retier(loadSettings());
+      for (const d of changed) this.emit("decision", d);
+      if (changed.length) this.log(`Fit percentiles updated against the larger pool: ${changed.length} waiting profiles re-tiered.`);
+      this.emit("retiered", changed);
+    } catch (e) {
+      this.log(`Could not re-tier: ${(e as Error).message}`);
+    }
   }
 
   async stop(): Promise<void> {
@@ -264,21 +304,50 @@ export class Swiper extends EventEmitter {
   }
 
   /**
-   * Is the profile on screen one we've judged before? Matched by the name-and-age fingerprint,
-   * and, to tell apart two people with the same name and age, the visible text has to agree
-   * with what was read the first time.
+   * Is the profile on screen one we've judged before? Feeld gives no profile id and the feed order
+   * changes between sweeps, so this never relies on position. Three independent signals are checked:
+   *   1. name and age (the fingerprint),
+   *   2. the text on screen: a long visible string (the bio) contained in the saved profile text, or
+   *      at least half of the visible strings found in it,
+   *   3. a photo on screen whose perceptual hash is within a few bits of a saved photo hash.
+   * Two of the three make a strong match, which is required before anything is sent. Name alone is
+   * only accepted for old records that saved no text or photos. Candidates are searched by fingerprint
+   * first, then by text and photos among recent decisions, so a changed display name or age still matches.
    */
-  private recognise(fingerprint: string, strings: string[]): Decision | null {
-    const cands = decisionsFor(fingerprint);
-    if (!cands.length) return null;
-    const probe = strings.filter((s) => s.length >= 8 && !SELECTORS.chrome.test(s));
-    return (
-      cands.find((d) => {
-        if (!probe.length || !d.profileText) return true;
-        const hits = probe.filter((s) => d.profileText!.includes(s)).length;
-        return hits >= Math.ceil(probe.length * 0.5);
-      }) ?? null
-    );
+  private async identify(nodes: UiNode[], strings: string[]): Promise<{ decision: Decision; strong: boolean; evidence: string } | null> {
+    const hdr = this.driver.header(nodes);
+    const fp = hdr ? this.driver.fingerprintOf(hdr.name, hdr.age, "") : null;
+    const visible = strings.filter((s) => !SELECTORS.chrome.test(s));
+    const longProbe = visible.filter((s) => s.length >= 40);
+    const shortProbe = visible.filter((s) => s.length >= 8 && !/miles? away|km away/i.test(s));
+    const byFp = fp ? decisionsFor(fp) : [];
+    const pool = [...byFp, ...recognitionCandidates().filter((d) => !byFp.some((x) => x.id === d.id) && (d.profileText || d.photoHashes?.length))];
+    if (!pool.length) return null;
+    const hashes = (await this.driver.photoHashesOnScreen(nodes).catch(() => [])).map((h) => BigInt("0x" + h));
+    let best: { decision: Decision; score: number; strong: boolean; evidence: string } | null = null;
+    for (const d of pool) {
+      const nameAge = !!fp && d.fingerprint === fp;
+      let text = false;
+      if (d.profileText) {
+        const bio = longProbe.some((s) => d.profileText!.includes(s));
+        const hits = shortProbe.filter((s) => d.profileText!.includes(s)).length;
+        text = bio || (hits >= 2 && hits >= Math.ceil(shortProbe.length * 0.5));
+      }
+      let photo = false;
+      if (hashes.length && d.photoHashes?.length) {
+        const saved = d.photoHashes.map((h) => BigInt("0x" + h));
+        photo = hashes.some((a) => saved.some((b) => hamming(a, b) <= 6));
+      }
+      const score = (nameAge ? 1 : 0) + (text ? 1 : 0) + (photo ? 1 : 0);
+      const legacy = nameAge && !d.profileText && !d.photoHashes?.length;
+      const strong = score >= 2;
+      if (!strong && !legacy) continue;
+      const evidence = [nameAge ? "name+age" : "", text ? "text" : "", photo ? "photo" : ""].filter(Boolean).join("+") || "name+age (old record)";
+      // Prefer the strongest match; among equals, one still waiting for your review to be applied.
+      const pendingBonus = d.review && d.review !== "skip" && !d.applied ? 0.5 : 0;
+      if (!best || score + pendingBonus > best.score) best = { decision: d, score: score + pendingBonus, strong, evidence };
+    }
+    return best ? { decision: best.decision, strong: best.strong, evidence: best.evidence } : null;
   }
 
   /**
@@ -366,7 +435,7 @@ export class Swiper extends EventEmitter {
     if (!profile) return "no-card";
     if (this.state.batch) this.state.batch.evaluated++;
     this.setCurrent({ name: profile.name, fingerprint: profile.fingerprint, doing: "judging" });
-    this.log(`Evaluating ${profile.name ?? "unknown"}${profile.age ? `, ${profile.age}` : ""} (${profile.screens.length} screens, ${profile.photos.length} photos)…`);
+    this.log(`Evaluating ${profile.name ?? "unknown"}${profile.age ? `, ${profile.age}` : ""} (${profile.screens.length} screens, ${profile.photos.length} photos${settings.backend === "agent-sdk" ? `, via ${backendLabel(settings)}` : ""})…`);
 
     const id = `${Date.now().toString(36)}-${profile.fingerprint}`;
     const screenUrls = this.driver.saveImages(id, profile.screens, "s");
@@ -381,6 +450,7 @@ export class Swiper extends EventEmitter {
       name: profile.name,
       age: profile.age,
       photos: photoUrls,
+      ...(profile.photoHashes.length ? { photoHashes: profile.photoHashes } : {}),
       screens: screenUrls,
       profileText: profile.text,
       ...(distance !== undefined ? { distanceMiles: distance } : {}),
@@ -397,30 +467,29 @@ export class Swiper extends EventEmitter {
       const usage = { ...first.usage };
       let bioOnlyProbability: number | undefined;
       let quickPass = false;
-      const intEarnsLike = !!c && settings.intellectualEnabled && c.intellectual_exception;
-      if (c && (settings.quickPassBelow >= 1 || c.probability < settings.quickPassBelow) && !intEarnsLike) {
+      // A promising fit gets the full look even when the diet score is low.
+      const fitWorthALook = !!c && fitPercentileOf(c.fit_probability, [...fitPool(), c.fit_probability]) >= Math.min(settings.fitLikePercentile, 70);
+      if (c && (settings.quickPassBelow >= 1 || (c.probability < settings.quickPassBelow && !fitWorthALook))) {
         quickPass = true;
-        this.log(`${c.name ?? profile.name ?? "unknown"}: text-and-first-screen P=${c.probability.toFixed(2)}${c.probability < settings.threshold ? " → quick pass." : ", no further look needed."}`);
+        this.log(`${c.name ?? profile.name ?? "unknown"}: text-and-first-screen P=${c.probability.toFixed(2)}, fit ${c.fit_probability.toFixed(2)}${c.probability < settings.threshold ? " → quick pass." : ", no further look needed."}`);
       } else if (c && forModel.length > 1) {
         // Stage 2: worth a proper look. Send every screen and re-score with the full set.
         bioOnlyProbability = c.probability;
-        this.log(`${c.name ?? profile.name ?? "unknown"}: text-and-first-screen P=${c.probability.toFixed(2)}, looking at all ${forModel.length} screens…`);
+        this.log(`${c.name ?? profile.name ?? "unknown"}: text-and-first-screen P=${c.probability.toFixed(2)}, fit ${c.fit_probability.toFixed(2)}, looking at all ${forModel.length} screens…`);
         const second = await classifyProfile(asInput(forModel), settings);
         if (second.classification) c = second.classification;
         usage.input += second.usage.input;
         usage.output += second.usage.output;
         usage.cacheRead += second.usage.cacheRead;
       }
-      const vegLike = !!c && c.probability >= settings.threshold;
-      const intLike = !!c && settings.intellectualEnabled && c.intellectual_exception;
-      const likes = vegLike || intLike;
-      const likedFor: Decision["likedFor"] | undefined = vegLike && intLike ? "both" : vegLike ? "veg" : intLike ? "intellectual" : undefined;
-      const pings = likes && settings.pingEnabled && c!.probability >= settings.pingThreshold;
-      const action: Decision["action"] = !c ? "skipped" : pings ? "recommend_ping" : likes ? "recommend_like" : "recommend_pass";
+      const fitPercentile = c ? fitPercentileOf(c.fit_probability, [...fitPool(), c.fit_probability]) : null;
+      const { action, likedFor } = recommend(c, settings, fitPercentile);
       decision = {
         ...base,
         action,
-        ...(settings.pingEnabled ? { pingThreshold: settings.pingThreshold } : {}),
+        ...(settings.pingEnabled ? { pingThreshold: settings.pingThreshold, fitPingPercentile: settings.fitPingPercentile } : {}),
+        ...(fitPercentile !== null ? { fitPercentile } : {}),
+        fitLikePercentile: settings.fitLikePercentile,
         ...(likedFor ? { likedFor } : {}),
         name: c?.name ?? profile.name,
         age: c?.age ?? profile.age,
@@ -436,7 +505,8 @@ export class Swiper extends EventEmitter {
       const msg = (e as Error).message;
       this.log(`Classifier error: ${msg}`);
       decision = { ...base, action: "skipped", classification: null, error: msg };
-      if (/401|403|api key|authentication/i.test(msg)) {
+      // Auth failures and a model that asked to talk to Eli both end the batch: no retry, no pushing past it.
+      if (e instanceof ContactedEliError || /401|403|api key|authentication/i.test(msg)) {
         appendDecision(decision);
         this.emit("decision", decision);
         this.state.lastError = msg;
@@ -450,12 +520,20 @@ export class Swiper extends EventEmitter {
       this.log(`${decision.name ?? "unknown"}: drafting three ping openers with ${settings.draftModel}…`);
       try {
         const r = await draftPings(
-          { name: decision.name, age: decision.age, profileText: profile.text, screens: forModel.slice(0, 3), evidence: decision.classification?.evidence },
+          { name: decision.name, age: decision.age, profileText: profile.text, screens: forModel.slice(0, 3), evidence: decision.classification?.evidence, pastPings: pastPingExamples(pastPings()) },
           settings,
         );
         decision.pingDrafts = r.drafts;
         decision.draftsModel = settings.draftModel;
       } catch (e) {
+        if (e instanceof ContactedEliError) {
+          this.log(e.message);
+          appendDecision(decision);
+          this.emit("decision", decision);
+          this.state.lastError = e.message;
+          this.setStatus("error");
+          return "stop";
+        }
         this.log(`Drafting failed: ${(e as Error).message}. You can retry from the review card.`);
       }
     }
@@ -463,8 +541,9 @@ export class Swiper extends EventEmitter {
     appendDecision(decision);
     this.emit("decision", decision);
     const p = decision.classification?.probability;
-    const ex = decision.classification?.intellectual_exception ? " 🧠 EXCEPTION" : "";
-    this.log(`${decision.name ?? "unknown"}: P=${p === undefined ? "n/a" : p.toFixed(2)}${ex} → ${decision.action.replace("recommend_", "recommend ").toUpperCase()} (waiting for your review)`);
+    const f = decision.classification?.fit_probability;
+    const why = decision.likedFor ? ` for ${decision.likedFor === "both" ? "diet and fit" : decision.likedFor === "veg" ? "diet" : decision.likedFor}` : "";
+    this.log(`${decision.name ?? "unknown"}: P=${p === undefined ? "n/a" : p.toFixed(2)}, fit ${f === undefined ? "n/a" : f.toFixed(2)}${decision.fitPercentile !== undefined ? ` (${decision.fitPercentile}th pct)` : ""} → ${decision.action.replace("recommend_", "recommend ").toUpperCase()}${why} (waiting for your review)`);
     return "ok";
   }
 
@@ -482,10 +561,22 @@ export class Swiper extends EventEmitter {
         this.endBatch(`${this.state.batch.plannedMinutes}-minute batch finished (${this.state.batch.evaluated} judged, ${this.state.batch.applied} reviews applied).`);
         break;
       }
+      const sendMode = this.state.batch?.mode === "send";
       const handled = (this.state.batch?.evaluated ?? 0) + (this.state.batch?.applied ?? 0);
-      if (handled >= settings.maxProfilesPerBatch) {
+      if (!sendMode && handled >= settings.maxProfilesPerBatch) {
         this.endBatch(`reached the cap of ${settings.maxProfilesPerBatch} profiles.`);
         break;
+      }
+      if (sendMode) {
+        const q = queueSummary();
+        if (q.like + q.ping + q.pass === 0) {
+          this.endBatch(`everything queued has been sent (${this.state.batch?.applied ?? 0} done).`);
+          break;
+        }
+        if ((this.state.batch?.passedBy ?? 0) >= settings.maxProfilesPerBatch) {
+          this.endBatch(`judged ${this.state.batch?.passedBy ?? 0} new profiles without finding the rest of the queue (${this.state.batch?.applied ?? 0} sent). The remaining ones may be gone from Discover.`);
+          break;
+        }
       }
 
       const { state, nodes, strings } = await this.driver.observe();
@@ -532,28 +623,35 @@ export class Swiper extends EventEmitter {
       }
 
       // Who's on screen? A profile we've judged gets your review applied, or is browsed past.
-      const hdr = this.driver.header(nodes);
-      const fp = hdr ? this.driver.fingerprintOf(hdr.name, hdr.age, "") : null;
-      const known = fp ? this.recognise(fp, strings) : null;
-      if (known && fp) {
+      const found = await this.identify(nodes, strings);
+      if (found) {
+        const known = found.decision;
         consecutiveFailures = 0;
         if (known.review && known.review !== "skip" && !known.applied) {
-          if (!(await this.applyReview(known, settings))) break;
-          continue;
+          if (!found.strong) {
+            // Name and age alone are not enough to send something; look again next time round.
+            this.log(`${known.name ?? "unknown"}: looks like a profile with a queued ${known.review}, but only the name matches; not acting on it.`);
+          } else {
+            this.log(`${known.name ?? "unknown"}: recognised by ${found.evidence}.`);
+            if (!(await this.applyReview(known, settings))) break;
+            continue;
+          }
         }
-        const n = (seenAgain.get(fp) ?? 0) + 1;
-        seenAgain.set(fp, n);
+        const n = (seenAgain.get(known.id) ?? 0) + 1;
+        seenAgain.set(known.id, n);
         if (n >= 3) {
           this.endBatch(`Feeld keeps showing ${known.name ?? "the same profile"} (${describeKnown(known)}); nothing new is coming up.`);
           break;
         }
-        this.setCurrent({ name: known.name, fingerprint: fp, doing: "moving on" });
-        this.log(`${known.name ?? "unknown"}: already judged (${describeKnown(known)}); moving on without voting.`);
+        this.setCurrent({ name: known.name, fingerprint: known.fingerprint, doing: "moving on" });
+        this.log(`${known.name ?? "unknown"}: already judged (${describeKnown(known)}, recognised by ${found.evidence}); moving on without voting.`);
         if (!(await this.moveOn(settings))) break;
         await sleep(rand(800, 2500));
         continue;
       }
 
+      // A new profile: judged in either mode (a send batch keeps collecting while it looks for the reviewed ones).
+      if (sendMode && this.state.batch) this.state.batch.passedBy++;
       const r = await this.judgeNew(settings);
       if (r === "stop") return;
       if (r === "no-card") {
@@ -601,7 +699,18 @@ export class Swiper extends EventEmitter {
   /** Diagnostic: what does the phone show right now? */
   async inspect(): Promise<unknown> {
     await this.ensureDevice();
-    return this.driver.inspect();
+    const report = (await this.driver.inspect()) as Record<string, unknown>;
+    // Would the batch loop recognise the profile on screen as one already judged?
+    if (report.state === "discover") {
+      try {
+        const { nodes, strings } = await this.driver.observe();
+        const found = await this.identify(nodes, strings);
+        report.recognised = found ? { id: found.decision.id, name: found.decision.name, evidence: found.evidence, strong: found.strong, status: describeKnown(found.decision) } : null;
+      } catch (e) {
+        report.recognised = { error: (e as Error).message };
+      }
+    }
+    return report;
   }
 
   /** Manual controls from the dashboard. */
@@ -618,6 +727,15 @@ export class Swiper extends EventEmitter {
           : r === "match"
             ? `WARNING: the "${settings.advanceGesture}" gesture produced a match screen, so it counts as a like. Choose another gesture in Settings.`
             : `next profile via "${settings.advanceGesture}": ${r}`;
+      }
+      case "pingtest": {
+        // Opens the composer, types a test note, checks the Send button is there, then cancels. Nothing is sent.
+        const r = await this.driver.ping("Hi! Just checking the message box works.", { dryRun: true });
+        return r === "dry-run"
+          ? "ping composer works: opened, typed, found Send, cancelled without sending"
+          : r === "unavailable"
+            ? "no ping composer: no Ping button, or Feeld showed an upsell / out-of-pings sheet instead"
+            : `ping test ${r}: see the log above for which step stopped`;
       }
       case "dismiss":
         return await this.driver.dismissPopups();
