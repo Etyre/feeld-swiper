@@ -104,7 +104,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .reviewList .card { grid-template-columns: 200px 1fr; }
 .dot.waiting { background: #6ea8fe; }
 
-.verdict { flex-wrap: wrap; }
+.verdict { flex-direction: column; align-items: stretch; gap: 6px; }
+.vrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vlabel { min-width: 64px; }
 .vbtns { display: flex; gap: 6px; }
 .vbtn.lower.on { background: rgba(255,92,122,.22); border-color: var(--danger); color: var(--danger); }
 .vbtn.right.on { background: rgba(139,147,167,.25); border-color: #aab2c5; color: var(--text); }
@@ -215,3 +217,45 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-siz
 .bulk .pair button { flex: 1; font-size: 12px; padding: 6px 8px; }
 .queuehint { margin: -6px 0 12px; }
 .queuehint kbd { font: 11px ui-monospace, Menlo, monospace; background: rgba(255,255,255,.08); padding: 1px 6px; border-radius: 4px; }
+
+/* To review: tier headers in the ranked list */
+.tierhead { display: flex; align-items: baseline; gap: 10px; margin: 22px 0 10px; padding: 0 2px 8px; border-bottom: 1px solid var(--line); font-size: 15px; }
+.tierhead:first-child { margin-top: 0; }
+.tierhead b { font-size: 17px; }
+.tierhead .count { color: var(--muted); font-weight: 600; }
+.tierhead .blurb { color: var(--muted); font-size: 12px; }
+.tierhead.recommend_ping b { color: #d9c6ff; }
+.tierhead.recommend_like b { color: var(--accent); }
+.tierhead.recommend_pass b { color: var(--muted); }
+.pingbox .chars { text-align: right; color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+/* Fit score */
+.prob .plabel { color: var(--muted); font-size: 11px; min-width: 36px; text-transform: uppercase; letter-spacing: .04em; }
+.fill.fitfill { background: linear-gradient(90deg, #5a6478, #b48bff); }
+.prob.fit .thresh { background: #b48bff; } .prob.fit .thresh.super { background: #d9c6ff; }
+.badge.likedfor.fit { background: rgba(180,139,255,.18); color: #d9c6ff; }
+.badge.likedfor.veg { background: rgba(80,200,120,.16); color: #9fe3b4; }
+.badge.likedfor.both { background: rgba(255,200,80,.16); color: #ffd98a; }
+.evidence li.fitev { list-style: none; margin-left: -18px; padding-left: 18px; text-indent: -18px; }
+.evidence li.fitev::before { content: "⭐ "; }
+.evidence li.fitev.against::before { content: "⚠ "; }
+.evidence li.fitev.neutral::before { content: "· "; }
+
+/* Profile text, formatted */
+.ptext { white-space: normal; }
+.ptext .pline { white-space: pre-wrap; margin: 0 0 6px; }
+.ptext .phead { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 4px; }
+.ptext .chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 4px; }
+.ptext .chip { background: rgba(255,255,255,.07); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; font-size: 11px; }
+.ptext .chip.shared { border-color: #b48bff; color: #d9c6ff; }
+.ptext .pmeta { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+details.ptextBox.open-by-default summary { display: none; }
+details.ptextBox.open-by-default .ptext { max-height: none; }
+
+/* Cut line in the ranked list */
+.cutline { display: flex; justify-content: center; margin: -4px 0 14px; }
+.cutline button { font-size: 11px; color: var(--muted); background: transparent; border: 1px dashed var(--line); border-radius: 999px; padding: 3px 12px; cursor: pointer; }
+.cutline button:hover { color: var(--danger); border-color: var(--danger); }
+.cutline button.confirm { color: var(--danger); border-color: var(--danger); border-style: solid; }
+.sendrow { gap: 10px; align-items: center; margin: 0 0 12px; }
+.sendrow .hint { margin: 0; }

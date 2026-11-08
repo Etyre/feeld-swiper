@@ -2,25 +2,27 @@ import fs from "node:fs";
 import { z } from "zod";
 import { SETTINGS_FILE } from "./paths.js";
 
-/** The intellectual exception is raised when the model's probability reaches this. Fixed, not a slider. */
-export const EXCEPTION_THRESHOLD = 0.6;
-
-export const ModelSchema = z.enum(["claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-opus-4-8", "claude-haiku-4-5"]);
+export const ModelSchema = z.enum(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-opus-4-8", "claude-haiku-4-5"]);
 
 export const SettingsSchema = z.object({
-  /** Recommend a like when P(meets criteria) >= threshold. Nothing is sent to Feeld until you review. */
+  /** Recommend a like when P(veg*n) >= threshold. Nothing is sent to Feeld until you review. */
   threshold: z.number().min(0).max(1).default(0.5),
-  /** The intellectual exception: if the model judges a profile exceptionally intelligent, intellectual,
-   *  philosophical, thoughtful and open-minded, it's a like regardless of the diet score. Binary. */
-  intellectualEnabled: z.boolean().default(true),
+  /** Your date-me page: what you're looking for. The screener scores "fit" against it, separately from diet,
+   *  and the ping drafter writes with it in mind. */
+  dateMePage: z.string().max(40_000).default(""),
+  /** Fit is a percentile within everything scored so far (99 = a better fit than 99% of the pool).
+   *  Recommend a like when the fit percentile >= this, whatever the diet score. */
+  fitLikePercentile: z.number().min(0).max(100).default(80),
+  /** Recommend a ping when the fit percentile >= this. Either the diet ping bar or this one earns a ping. */
+  fitPingPercentile: z.number().min(0).max(100).default(95),
   /** Recommend a ping (Feeld's super like: a message sent before matching) instead of a like when P >= this.
    *  Three openers are drafted for you to pick from at review time. */
   pingEnabled: z.boolean().default(true),
   pingThreshold: z.number().min(0).max(1).default(0.9),
   /** Notes about you for the model that drafts ping messages: who you are, what you're into, how you write. */
   pingPersona: z.string().max(4000).default(""),
-  /** Model that drafts ping openers. Opus by default; it's a handful of calls per batch. */
-  draftModel: ModelSchema.default("claude-opus-5"),
+  /** Model that drafts ping openers. Sonnet by default: cheap, and you edit every message anyway. */
+  draftModel: ModelSchema.default("claude-sonnet-5-5"),
   /** Prior probability (0-1) that a random profile in your pool meets the criteria. */
   prior: z.number().min(0.01).max(0.99).default(0.1),
   /** Each run is a "batch": a random session length like a person browsing for a while, then stopping. */
@@ -53,6 +55,12 @@ export const SettingsSchema = z.object({
   maxProfileScrolls: z.number().int().min(1).max(30).default(12),
   model: ModelSchema.default("claude-opus-5"),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).default("medium"),
+  /** How calls reach Claude. "api": the Claude API with the key in .env. "agent-sdk": the Claude Agent SDK
+   *  (Claude Code as a library) with all its tools off; one prompt in, one JSON object out. */
+  backend: z.enum(["api", "agent-sdk"]).default("api"),
+  /** Agent SDK only. "login": drop the API key so the harness uses this machine's Claude Code sign-in.
+   *  "api-key": keep the key and bill the API through the harness. */
+  agentSdkAuth: z.enum(["login", "api-key"]).default("login"),
   /** Ask the model for a written reasoning paragraph on each card. Slower; the evidence list is kept either way. */
   captureReasoning: z.boolean().default(false),
   /** Free-text guidance for the model, e.g. how you want borderline diets treated. Goes into every prompt. */
@@ -66,6 +74,11 @@ export const SettingsSchema = z.object({
   stopEmulatorOnExit: z.boolean().default(false),
   /** Use a specific device (an `adb devices` serial, e.g. a real phone over USB). Empty = the emulator above. */
   deviceSerial: z.string().max(80).default(""),
+  /** Where the emulator says it is. Feeld's Discover feed follows the phone's GPS. */
+  city: z.enum(["berkeley", "sf", "dc", "nyc", "custom"]).default("berkeley"),
+  /** Coordinates used when city is "custom". */
+  latitude: z.number().min(-90).max(90).nullable().default(null),
+  longitude: z.number().min(-180).max(180).nullable().default(null),
 });
 export type Settings = z.infer<typeof SettingsSchema>;
 

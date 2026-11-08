@@ -11,8 +11,10 @@ __pycache__/
 .env.*
 !.env.example
 
-# runtime state: settings, decisions, screenshots, photos, logs (large and personal)
+# runtime state: settings, decisions, screenshots, photos, logs (large and personal),
+# and data/criteria.md: the selection criteria and fit guidance fed to the model
 data/
+data/criteria.md
 *.log
 
 # OS and editor noise

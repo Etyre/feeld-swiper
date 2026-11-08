@@ -27,34 +27,48 @@
 
     <p class="hint"><b>Start batch</b> browses Discover for a random session length. New profiles are judged and browsed past <b>without</b> a like or pass; you decide in the <b>To review</b> tab, and the next batch does your likes, pings and passes when those profiles come round again.</p>
 
+    <h2>Veg*n score</h2>
+    <p class="hint"><b>P(veg*n)</b>: how likely they are vegan, vegetarian, or otherwise not subsidizing factory farming. A Bayesian estimate: it starts from the prior and updates on the bio, tags and photos.</p>
     <label class="row">
       <span>Prior <b id="priorVal"></b></span>
       <input id="prior" type="range" min="0.01" max="0.99" step="0.01" />
     </label>
-    <p class="hint">Base rate of qualifying profiles in your pool. Needed likelihood ratio for 50%: <b id="lrNeeded"></b>×</p>
-
-    <label class="row"><span>Quick pass below <b id="quickPassVal"></b></span>
-      <input id="quickPassBelow" type="range" min="0" max="1" step="0.01" />
-    </label>
-    <p class="hint">First it judges on the profile text and the first screen. Below this score it decides on that alone. Otherwise it sends every screen and re-scores with the full set. At 100% every profile is judged on text and first screen only; at 0% every profile gets the full look.</p>
-
+    <p class="hint">Base rate of veg*n profiles in your pool. Needed likelihood ratio for 50%: <b id="lrNeeded"></b>×</p>
     <label class="row">
-      <span>Like threshold <b id="thresholdVal"></b></span>
+      <span>Like when P(veg*n) ≥ <b id="thresholdVal"></b></span>
       <input id="threshold" type="range" min="0" max="1" step="0.01" />
     </label>
-    <p class="hint">Recommend a like when P(meets criteria) ≥ threshold.</p>
+    <label class="row pingbar">
+      <span>Ping when P(veg*n) ≥ <b id="pingVal"></b></span>
+      <input id="pingThreshold" type="range" min="0" max="1" step="0.01" />
+    </label>
 
+    <h2>Personal fit score</h2>
+    <p class="hint"><b>Fit</b>: how good a match they'd be for you, judged against your own description below, separately from diet. The model's raw score is turned into a <b>percentile of everyone scored so far</b>: 99 means a better fit than 99% of the pool, so the bars below are cuts on the ranking and the top of the pool always clears them.</p>
+    <label class="row"><span>What you're looking for (your date-me page)</span>
+      <textarea id="dateMePage" rows="10" placeholder="Paste your date-me page or profile text. The model scores every profile's fit against it, separately from diet, and the ping drafter writes with it in mind."></textarea>
+    </label>
+    <label class="row">
+      <span>Like when fit percentile ≥ <b id="fitVal"></b></span>
+      <input id="fitLikePercentile" type="range" min="0" max="100" step="1" />
+    </label>
+    <label class="row pingbar">
+      <span>Ping when fit percentile ≥ <b id="fitPingVal"></b></span>
+      <input id="fitPingPercentile" type="range" min="0" max="100" step="1" />
+    </label>
+    <p class="hint">The two scores are independent routes: a profile is a <b>ping</b> if it clears either ping bar, a <b>like</b> if it clears either like bar, otherwise a <b>pass</b>. In the ranked list, profiles that clear both bars come first. Flag clear good fits on cards with ⭐; they're shown to the model as reference cases.</p>
+
+    <h2>Pings</h2>
     <label class="row"><span>Ping</span>
       <select id="pingEnabled"><option value="false">Off</option><option value="true">On</option></select>
     </label>
     <div id="pingOpts">
-      <label class="row">
-        <span>Recommend a ping when P ≥ <b id="pingVal"></b></span>
-        <input id="pingThreshold" type="range" min="0" max="1" step="0.01" />
-      </label>
       <label class="row"><span>Drafting model</span>
         <select id="draftModel">
-          <option value="claude-opus-5">Claude Opus 5 (recommended)</option>
+          <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (recommended)</option>
+          <option value="claude-opus-5-5">Claude Opus 5.5</option>
+          <option value="claude-haiku-5-5">Claude Haiku 5.5</option>
+          <option value="claude-opus-5">Claude Opus 5</option>
           <option value="claude-fable-5-1">Claude Fable 5.1</option>
           <option value="claude-sonnet-5">Claude Sonnet 5</option>
           <option value="claude-opus-4-8">Claude Opus 4.8</option>
@@ -62,15 +76,16 @@
         </select>
       </label>
       <label class="row"><span>About you, for the drafts</span>
-        <textarea id="pingPersona" rows="4" placeholder="Who you are, what you're into, how you write. E.g. 'Vegan, into philosophy and climbing, dry humour, lowercase, no emojis. Ask a real question, don't gush.'"></textarea>
+        <textarea id="pingPersona" rows="4" placeholder="How you write and anything the drafts should know beyond your date-me page. E.g. 'Dry humour, lowercase, no emojis. Ask a real question, don't gush.'"></textarea>
       </label>
     </div>
-    <p class="hint">A ping is Feeld's super like: a like that carries a message, sent before you match. For each recommended ping the drafting model writes three openers in your voice; you pick one, or write your own, in the To review tab. You can also ping any profile from its card. When Feeld is out of pings, the app sends a regular like instead.</p>
+    <p class="hint">A ping is Feeld's super like: a like that carries a message, sent before you match. For each recommended ping the drafting model writes three openers in your voice, drawing on your date-me page and the notes above; you edit them in the To review tab. You can also ping any profile from its card. When Feeld is out of pings, the app sends a regular like instead.</p>
 
-    <label class="row"><span>Intellectual exception</span>
-      <select id="intellectualEnabled"><option value="true">On</option><option value="false">Off</option></select>
+    <h2>Judging</h2>
+    <label class="row"><span>Quick pass below <b id="quickPassVal"></b></span>
+      <input id="quickPassBelow" type="range" min="0" max="1" step="0.01" />
     </label>
-    <p class="hint">If the model puts a profile at 60% or more likely to be exceptionally intelligent, intellectual, philosophical, thoughtful and open-minded, it recommends a like regardless of the diet score. Flag reference cases on cards with the 🧠 button; they're shown to the model.</p>
+    <p class="hint">First it judges on the profile text and the first screen. Below this P(veg*n), and with no promising fit, it decides on that alone. Otherwise it sends every screen and re-scores with the full set. At 100% every profile is judged on text and first screen only; at 0% every profile gets the full look.</p>
 
     <h2>Batches</h2>
     <label class="row"><span>Batch length (minutes, random between)</span>
@@ -110,7 +125,10 @@
     <label class="row"><span>Max scrolls per profile</span><input id="maxProfileScrolls" type="number" min="1" max="30" /></label>
     <label class="row"><span>Model</span>
       <select id="model">
-        <option value="claude-opus-5">Claude Opus 5 (recommended · $5 / $25 per M tokens)</option>
+        <option value="claude-opus-5-5">Claude Opus 5.5 (recommended · $4 / $20 per M tokens)</option>
+        <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (cheaper · $2 / $10)</option>
+        <option value="claude-haiku-5-5">Claude Haiku 5.5 (cheapest · $0.10 / $0.50)</option>
+        <option value="claude-opus-5">Claude Opus 5 ($5 / $25)</option>
         <option value="claude-sonnet-5">Claude Sonnet 5 (cheaper · $2 / $10)</option>
         <option value="claude-haiku-4-5">Claude Haiku 4.5 (cheapest · $1 / $5, no effort control)</option>
         <option value="claude-opus-4-8">Claude Opus 4.8 ($5 / $25)</option>
@@ -124,6 +142,21 @@
     <label class="row"><span>Written reasoning</span>
       <select id="captureReasoning"><option value="false">Off (faster; evidence list only)</option><option value="true">On (adds a reasoning paragraph to each card)</option></select>
     </label>
+    <label class="row"><span>Backend</span>
+      <select id="backend">
+        <option value="api">Claude API (API key in .env)</option>
+        <option value="agent-sdk">Claude Agent SDK (Claude Code as a library)</option>
+      </select>
+    </label>
+    <div id="agentSdkOpts">
+      <label class="row"><span>Agent SDK signs in with</span>
+        <select id="agentSdkAuth">
+          <option value="login">This machine's Claude Code login</option>
+          <option value="api-key">The API key in .env</option>
+        </select>
+      </label>
+      <p class="hint">The Agent SDK runs the Claude Code harness as a subprocess with every tool switched off: one prompt in, one JSON object out. Token counts come from the harness; its cost estimate is logged per profile.</p>
+    </div>
 
     <h2>Device</h2>
     <label class="row"><span>Virtual device (AVD name)</span><input id="avdName" type="text" /></label>
@@ -136,6 +169,14 @@
     </label>
     <label class="row"><span>Use a specific device (adb serial)</span><input id="deviceSerial" type="text" placeholder="empty = the virtual device above" /></label>
     <p class="hint">A real Android phone over USB with debugging on works too; the phone panel drives it the same way.</p>
+    <label class="row"><span>City</span>
+      <select id="city"><option value="berkeley">Berkeley, CA</option><option value="sf">San Francisco, CA</option><option value="dc">Washington, DC</option><option value="nyc">New York, NY</option><option value="custom">Custom coordinates…</option></select>
+    </label>
+    <div id="customCoords" class="pair" hidden>
+      <label class="row"><span>Latitude</span><input id="latitude" type="number" step="0.0001" min="-90" max="90" placeholder="37.8715" /></label>
+      <label class="row"><span>Longitude</span><input id="longitude" type="number" step="0.0001" min="-180" max="180" placeholder="-122.2730" /></label>
+    </div>
+    <p class="hint">Feeld's Discover feed follows the phone's GPS. The emulator is pointed here whenever it connects or you save; a real phone uses its own location.</p>
 
     <h2>Guidance for the model</h2>
     <textarea id="userGuidance" rows="5" placeholder="Standing instructions, e.g. 'Pescatarian counts as a yes for me' or 'Don't read anything into yoga.' Included in every prompt, along with your grades and notes on past calls."></textarea>
@@ -208,6 +249,7 @@
       <button data-action="like" class="likebtn">♥ Like</button>
     </div>
     <div class="prow">
+      <button data-action="pingtest" title="Opens the Ping composer, types a test note, checks the Send button is there, then cancels. Nothing is sent.">Test ping (no send)</button>
       <button data-action="dismiss">Dismiss popup</button>
       <button data-action="discover">Open Feeld</button>
       <button data-action="restart">Restart Feeld</button>
@@ -221,10 +263,11 @@
   <section class="review">
     <div class="filters panel queuefilters">
       <label class="row"><span>Show</span>
-        <select id="qShow"><option value="all">Everything waiting</option><option value="like">Recommended like or ping</option><option value="ping">Recommended ping</option><option value="pass">Recommended pass</option><option value="exception">🧠 Intellectual exception</option><option value="skipped">Not scored</option></select>
+        <select id="qBatch"><option value="all">All batches</option></select>
+        <select id="qShow"><option value="all">Everything waiting</option><option value="like">Recommended like or ping</option><option value="ping">Recommended ping</option><option value="pass">Recommended pass</option><option value="fit">Recommended for fit</option><option value="veg">Recommended for diet</option><option value="skipped">Not scored</option></select>
       </label>
       <label class="row"><span>Sort</span>
-        <select id="qSort"><option value="prob">P(veg*n), high to low</option><option value="int">Exception probability, high to low</option><option value="time">Newest first</option><option value="oldest">Oldest first</option><option value="near">Nearest first</option></select>
+        <select id="qSort"><option value="rank">Ranked: pings, then likes, then passes</option><option value="prob">P(veg*n), high to low</option><option value="fit">Fit, high to low</option><option value="time">Newest first</option><option value="oldest">Oldest first</option><option value="near">Nearest first</option></select>
       </label>
       <div class="row bulk">
         <span>Bulk</span>
@@ -235,7 +278,12 @@
       </div>
       <div class="filterSummary" id="queueSummary"></div>
     </div>
-    <p class="hint queuehint">Your choice is queued; the next batch does it on Feeld when the profile comes round again. <kbd>←</kbd> pass and <kbd>→</kbd> like act on the top card.</p>
+    <p class="hint queuehint">Ranked by the model's call: pings with a drafted message first, then likes, then passes; within a tier, profiles that clear both the diet and fit bars first, then by the two scores combined. Nothing is sent until you decide here; every change you make is fed back to the model. Each card has a <b>pass on everyone below</b> cut line. Your choices are queued; <b>Send to Feeld</b> delivers them. <kbd>←</kbd> pass and <kbd>→</kbd> like act on the top card.</p>
+    <div class="row sendrow">
+      <button id="sendQueued" class="primary" title="Browse Discover until every queued like, ping and pass has been delivered, judging new profiles on the way">Send to Feeld</button>
+      <button id="rescoreBtn" title="Re-score every waiting profile from its saved text and screens with the current prompt and thresholds (no phone needed)">Re-score waiting profiles</button>
+      <span id="sendHint" class="hint"></span>
+    </div>
     <button id="queuePending" class="pending" hidden></button>
     <div id="queueList" class="reviewList"></div>
   </section>
@@ -245,16 +293,16 @@
   <section class="review">
     <div class="filters panel">
       <label class="row">
-        <span>Show profiles with <select id="minPWhich" class="inline"><option value="veg">P(veg*n)</option><option value="int">P(exception)</option></select> ≥ <b id="minPVal">0%</b></span>
+        <span>Show profiles with <select id="minPWhich" class="inline"><option value="veg">P(veg*n)</option><option value="fit">fit percentile</option></select> ≥ <b id="minPVal">0%</b></span>
         <input id="minP" type="range" min="0" max="1" step="0.05" value="0" />
       </label>
       <label class="row"><span>Batch</span>
         <select id="fBatch"><option value="all">All batches</option></select>
       </label>
       <label class="row"><span>Model's call</span>
-        <select id="fAction"><option value="all">All</option><option value="like">Recommended like or ping</option><option value="ping">Recommended ping</option><option value="pass">Recommended pass</option><option value="exception">🧠 Intellectual exception</option><option value="skipped">Not scored</option></select>
+        <select id="fAction"><option value="all">All</option><option value="like">Recommended like or ping</option><option value="ping">Recommended ping</option><option value="pass">Recommended pass</option><option value="fit">Recommended for fit</option><option value="skipped">Not scored</option></select>
       </label>
-      <label class="row"><span>Your grade</span>
+      <label class="row"><span>Your grade on the <select id="fVerdictWhich" class="inline"><option value="veg">diet</option><option value="fit">fit</option></select> call</span>
         <select id="fVerdict"><option value="all">All</option><option value="ungraded">Not graded yet</option><option value="higher">Should be higher</option><option value="lower">Should be lower</option><option value="about_right">About right</option></select>
       </label>
       <label class="row"><span>Your review</span>
@@ -264,7 +312,7 @@
         <select id="fProb"><option value="gut">Model's gut check</option><option value="both">Gut check + arithmetic</option></select>
       </label>
       <label class="row"><span>Sort</span>
-        <select id="fSort"><option value="prob">P(veg*n), high to low</option><option value="int">Intellectually Open-minded Exception probability, high to low</option><option value="time">Newest first</option><option value="oldest">Oldest first</option><option value="near">Nearest first</option></select>
+        <select id="fSort"><option value="rank">Ranked: pings, then likes, then passes</option><option value="prob">P(veg*n), high to low</option><option value="fit">Fit, high to low</option><option value="time">Newest first</option><option value="oldest">Oldest first</option><option value="near">Nearest first</option></select>
       </label>
       <div class="filterSummary" id="filterSummary"></div>
     </div>
@@ -281,12 +329,13 @@
         <h3 class="name"></h3>
         <span class="badge action"></span>
       </div>
-      <div class="prob"><div class="bar"><div class="fill"></div><div class="thresh" title="Like threshold"></div><div class="thresh super" title="Ping threshold" hidden></div></div><span class="pval"></span></div>
+      <div class="prob veg"><span class="plabel" title="Probability they are vegan, vegetarian, or otherwise not subsidizing factory farming">veg*n</span><div class="bar"><div class="fill"></div><div class="thresh" title="Like threshold"></div><div class="thresh super" title="Ping threshold" hidden></div></div><span class="pval"></span></div>
+      <div class="prob fit"><span class="plabel" title="Fit for you, judged against your date-me page, as a percentile of everyone scored so far">fit</span><div class="bar"><div class="fill fitfill"></div><div class="thresh" title="Fit like bar (percentile)"></div><div class="thresh super" title="Fit ping bar (percentile)" hidden></div></div><span class="pval"></span></div>
       <div class="model"><span class="badge modelchip"></span><span class="stage"></span></div>
       <div class="diet"></div>
       <ul class="evidence"></ul>
       <details><summary>Reasoning</summary><p class="reasoning"></p></details>
-      <details><summary>Profile text</summary><pre class="ptext"></pre></details>
+      <details class="ptextBox"><summary>Profile text</summary><div class="ptext"></div></details>
       <details class="screensBox"><summary>Screens</summary><div class="screens"></div></details>
       <div class="reviewbar">
         <span class="rlabel"></span>
@@ -299,8 +348,9 @@
       </div>
       <div class="pingbox" hidden>
         <div class="drafts"></div>
-        <label class="draft own"><input type="radio" value="own" /><span class="dtext"><b>Write my own</b></span></label>
-        <textarea class="ownmsg" rows="2" maxlength="280" placeholder="Your message (up to 280 characters)"></textarea>
+        <label class="draft own"><input type="radio" value="own" /><span class="dtext"><b>Start from scratch</b></span></label>
+        <textarea class="ownmsg" rows="3" maxlength="280" placeholder="The message that will be sent. Pick a draft above to start from it, then edit."></textarea>
+        <div class="chars"></div>
         <div class="pingactions">
           <button class="primary queueping">Queue this ping</button>
           <button class="redraft">Redraft</button>
@@ -309,14 +359,25 @@
         </div>
       </div>
       <div class="verdict">
-        <span class="vlabel"></span>
-        <span class="vbtns">
-          <button class="vbtn lower" data-v="lower" title="The model's probability should have been lower">⬇ Lower probability</button>
-          <button class="vbtn right" data-v="about_right" title="The model's probability was about right">✓ No change</button>
-          <button class="vbtn higher" data-v="higher" title="The model's probability should have been higher">⬆ Higher probability</button>
-        </span>
-        <button class="vbtn exemplar" title="Flag this profile as a reference case of the intellectual exception (shown to the model)">🧠 Exception</button>
-        <label class="userp"><span>Your estimate</span><input type="number" class="userpRange" min="0" max="100" step="1" placeholder="–" /><span>%</span></label>
+        <div class="vrow">
+          <span class="vlabel" title="Grade the model's P(veg*n)">Diet call:</span>
+          <span class="vbtns" data-score="veg">
+            <button class="vbtn lower" data-v="lower" title="The model's diet probability should have been lower">⬇ Lower probability</button>
+            <button class="vbtn right" data-v="about_right" title="The model's diet probability was about right">✓ No change</button>
+            <button class="vbtn higher" data-v="higher" title="The model's diet probability should have been higher">⬆ Higher probability</button>
+          </span>
+          <label class="userp" title="Your own P(veg*n). Also sets the grade: more than 10 points off the model's is higher/lower."><span>Your estimate</span><input type="number" class="userpRange" min="0" max="100" step="1" placeholder="–" /><span>%</span></label>
+        </div>
+        <div class="vrow">
+          <span class="vlabel" title="Grade the model's fit percentile">Fit call:</span>
+          <span class="vbtns" data-score="fit">
+            <button class="vbtn lower" data-v="lower" title="The model's fit percentile should have been lower">⬇ Lower percentile</button>
+            <button class="vbtn right" data-v="about_right" title="The model's fit percentile was about right">✓ No change</button>
+            <button class="vbtn higher" data-v="higher" title="The model's fit percentile should have been higher">⬆ Higher percentile</button>
+          </span>
+          <button class="vbtn exemplar" title="Flag this profile as a reference case of a good fit (shown to the model)">⭐ Reference fit</button>
+          <label class="userp" title="Where you'd rank this profile among everyone scored so far. Also sets the grade: more than 10 points off the model's is higher/lower."><span>Your percentile</span><input type="number" class="userfitRange" min="0" max="100" step="1" placeholder="–" /><span>th</span></label>
+        </div>
       </div>
       <textarea class="note" rows="2" placeholder="Notes for the model: what did it miss or over-weight here? Saved on blur; fed into future prompts."></textarea>
       <div class="meta"></div>

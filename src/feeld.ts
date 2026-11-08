@@ -21,25 +21,30 @@ export const FEELD_PACKAGE = "co.feeld";
 export const SELECTORS = {
   like: { label: /^(like|heart|yes|send (a )?like|like (this )?(profile|person|human)|like button)$/i, id: /(^|[_.:/-])(like|heart|yes)([_.-]|$)/i },
   pass: { label: /^(pass|skip|dislike|no|nope|next|not interested|skip (this )?(profile|person|human)|pass button|x)$/i, id: /(^|[_.:/-])(pass|skip|dislike|nope)([_.-]|$)/i },
+  // Seen on the real app: ids profile.actions.like.button / .dislike.button / .ping.button; the ping button's label is "17 Pings left".
   /** Ping: Feeld's super like, a message sent before matching. Opens a composer. */
-  ping: { label: /^(ping|send (a )?ping|ping (them|button))$/i, id: /(^|[_.:/-])ping([_.-]|$)/i },
-  send: { label: /^(send|send ping|send message)$/i, id: /(^|[_.:/-])send([_.-]|$)/i },
-  outOfPings: [/out of pings/i, /no pings (left|remaining)/i, /get more pings/i, /pings? (will )?(reset|refresh|renew)/i, /\d+ pings? (left|remaining)/i],
+  ping: { label: /^(ping|send (a )?ping|ping (them|button)|\d+ pings? left)$/i, id: /(^|[_.:/-])ping([_.-]|$)/i },
+  send: { label: /^(send|send ping|send message)$/i, id: /(^|[_.:/-])(send|confirm)([_.-]|$)/i },
+  /** The ping composer's note field before it's focused ("Add a note…"). */
+  pingNote: /^add a (note|message|intro)/i,
+  /** "17 Pings left" is the normal ping button label, so only a zero count means out. */
+  outOfPings: [/out of pings/i, /no pings (left|remaining)/i, /get more pings/i, /pings? (will )?(reset|refresh|renew)/i, /\b0 pings? (left|remaining)/i],
   readMore: /^(read|see|show) more$/i,
   /** Bottom navigation entry for the swipe screen. Matched as a prefix: RN often reports "Discover, tab, 1 of 4". */
   nav: /^(discover|explore|home|browse)\b/i,
-  match: [/it.?s a (match|connection)/i, /you.?ve (matched|connected)/i, /new (match|connection)/i, /you (both )?liked each other/i, /say (hi|hello) to/i],
+  /** Checked against short UI strings only (see uiJoined): bios say things like "open to new connections". */
+  match: [/it.?s a (match|connection)/i, /you.?ve (matched|connected)/i, /you (both )?liked each other/i, /say (hi|hello) to/i],
   outOfLikes: [/out of likes/i, /no (more )?likes left/i, /reached your (daily )?(like )?limit/i, /come back (tomorrow|later|in \d)/i, /likes? (will )?(reset|refresh|renew)/i, /more likes (in|tomorrow)/i],
   noMoreProfiles: [/no (more|new) (people|profiles|humans|members)/i, /you.?ve seen everyone/i, /that.?s everyone/i, /come back later for more/i, /widen your (search|filters)/i, /expand your (search|filters|distance)/i, /nobody new/i],
-  loggedOut: [/continue with (apple|google|facebook|email|phone)/i, /^(log in|sign in|sign up|create (an )?account|get started|join feeld)$/im, /welcome to feeld/i, /enter your (phone|email|number)/i, /verification code/i, /log in with/i],
+  loggedOut: [/continue with (apple|google|facebook|email|phone)/i, /^(log in|sign in|sign up|create (an )?account|get started|join feeld)$/im, /welcome to feeld/i, /enter your (phone|email|number)/i, /verification code/i, /log in with/i, /log back in with/i, /choose another account/i],
   /** Screens the driver must never tap on. Left with Back only. */
   offLimits: [/edit profile/i, /^settings$/im, /account settings/i, /manage (membership|subscription)/i, /payment method/i, /^subscribe$/im, /google play/i, /\bbuy\b/i, /1-tap buy/i, /delete account/i, /pause (my )?(profile|account)/i, /log out/i, /change (email|phone|password)/i],
   /** Upsell overlays: only here may an X labelled "Close" be tapped. */
-  upsell: [/majestic/i, /upgrade/i, /premium/i, /\bunlock\b/i, /go majestic/i, /free trial/i, /pings?\b/i, /see who likes you/i, /incognito/i],
+  upsell: [/majestic/i, /upgrade/i, /premium/i, /\bunlock\b/i, /go majestic/i, /free trial/i, /get more pings/i, /out of pings/i, /see who likes you/i, /incognito/i],
   /** Only labels that unambiguously decline something. "Skip" is excluded: it may be the pass button. */
   dismiss: /^(not now|maybe later|no,? thanks|no thanks|keep (swiping|exploring|browsing|discovering)|continue (swiping|exploring|browsing)|back to (discover|browsing|explore|feed)|i.ll pass|dismiss|remind me later|not interested)$/i,
   /** App chrome to strip out of the profile text sent to the model. */
-  chrome: /^(discover|explore|likes|connections|chats|messages|me|profile|like|pass|skip|dislike|report|block|hide|share|ping|send (a )?ping|more|read more|see more|show more|tab|\d+ of \d+|[a-z]+, tab, \d+ of \d+)$/i,
+  chrome: /^(discover|explore|likes|connections|chats|messages|me|profile|account|like|pass|skip|dislike|report|block|hide|share|ping|send (a )?ping|\d+ pings? left|\d+|more|read more|see more|show more|tab|\d+ of \d+|[a-z]+, tab, \d+ of \d+|photo carousel|.{1,40}['’]s profile|verified profile|active \d+\s?\w+ ago|active (today|yesterday)|recently online|lgbtqia\+ mode|\d+ genders?|\d+ shared desires?|\d+ shared|hidden bio|tap to reveal|hidden bio\. tap to reveal|block or report)$/i,
 };
 
 export interface ScrapedProfile {
@@ -51,6 +56,8 @@ export interface ScrapedProfile {
   screens: Buffer[];
   /** JPEG crops of the large images found on those screens (the profile photos), deduplicated. */
   photos: Buffer[];
+  /** Perceptual hashes (hex) of those photos, used to recognise the profile when it comes round again. */
+  photoHashes: string[];
 }
 
 export type DeckState =
@@ -72,8 +79,13 @@ const chance = (p: number) => Math.random() < p;
 /** Right-skewed dwell time: mostly short glances, occasionally a long look. */
 const dwell = (base: number) => Math.round(base * Math.exp(rand(-0.6, 0.9)));
 
+/** Curly quotes, dashes and ellipses to their ASCII forms, so `adb shell input text` types them. */
+export function asciiPunctuation(s: string): string {
+  return s.replace(/[\u2018\u2019\u201A\u2032]/g, "'").replace(/[\u201C\u201D\u201E\u2033]/g, '"').replace(/[\u2013\u2014]/g, "-").replace(/\u2026/g, "...").replace(/\u00A0/g, " ");
+}
+
 /** 64-bit average hash of an image, for near-duplicate detection. */
-async function ahash(img: Buffer): Promise<bigint> {
+export async function ahash(img: Buffer): Promise<bigint> {
   const raw = await sharp(img).resize(8, 8, { fit: "fill" }).grayscale().raw().toBuffer();
   let sum = 0;
   for (const v of raw) sum += v;
@@ -82,7 +94,7 @@ async function ahash(img: Buffer): Promise<bigint> {
   for (let i = 0; i < raw.length; i++) bits = (bits << 1n) | (raw[i] > mean ? 1n : 0n);
   return bits;
 }
-function hamming(a: bigint, b: bigint): number {
+export function hamming(a: bigint, b: bigint): number {
   let x = a ^ b;
   let n = 0;
   while (x) {
@@ -131,8 +143,28 @@ export class FeeldDriver {
     return out;
   }
 
-  /** Name and age from the strings on screen ("Ada, 29", "Ada 29", or "Ada" followed by "29"). */
+  /**
+   * Screen text for state checks (match screen, upsell, off-limits, logged out): short strings only,
+   * so a bio or prompt answer ("open to new connections", "log out of your comfort zone") never trips them.
+   */
+  private uiJoined(strings: string[]): string {
+    return strings.filter((s) => s.length < 90).join("\n");
+  }
+
+  /**
+   * Name and age. On the real app the name node has id profile.imaginaryName and the age line reads
+   * "26\uFFFCWoman\uFFFCQueer" (object-replacement characters between the chips). Falls back to the
+   * text heuristics ("Ada, 29", "Ada 29", or "Ada" followed by "29").
+   */
   header(nodes: UiNode[]): { name: string; age: number } | null {
+    const app = this.appNodes(nodes);
+    const nameNode = app.find((n) => /imaginaryName$/i.test(n.id) && n.text.trim());
+    if (nameNode) {
+      for (const n of app) {
+        const m = /^(\d{2})(?:\uFFFC|\s*[·,]|\s*$)/.exec(n.text || "");
+        if (m && +m[1] >= 18 && +m[1] <= 99) return { name: nameNode.text.trim(), age: +m[1] };
+      }
+    }
     const strings = this.texts(nodes).filter((s) => !SELECTORS.chrome.test(s));
     for (const s of strings) {
       const m = /^([^\d\n]{1,40}?)[,\s·]+(\d{2})(?:\b|$)/.exec(s);
@@ -159,8 +191,10 @@ export class FeeldDriver {
     return null;
   }
 
-  private offLimits(strings: string[]): boolean {
-    const joined = strings.join("\n");
+  /** A settings / account / payment screen. Never true while the Discover vote buttons are on screen. */
+  private offLimits(nodes: UiNode[]): boolean {
+    if (this.findVoteButton(nodes, "like") || this.findVoteButton(nodes, "pass")) return false;
+    const joined = this.uiJoined(this.texts(nodes));
     return SELECTORS.offLimits.some((re) => re.test(joined));
   }
 
@@ -214,13 +248,13 @@ export class FeeldDriver {
     if (fg && fg !== FEELD_PACKAGE) return { state: "off-app", nodes: [], strings: [] };
     const nodes = await this.client.dump();
     const strings = this.texts(nodes);
-    const joined = strings.join("\n");
+    const joined = this.uiJoined(strings);
     const test = (res: RegExp[]) => res.some((re) => re.test(joined));
     const like = this.findVoteButton(nodes, "like");
     const pass = this.findVoteButton(nodes, "pass");
     let state: DeckState = "unknown";
-    if (this.offLimits(strings)) state = "off-limits";
-    else if (test(SELECTORS.match)) state = "match";
+    if (this.offLimits(nodes)) state = "off-limits";
+    else if (test(SELECTORS.match) && !like) state = "match";
     else if (test(SELECTORS.outOfLikes)) state = "out-of-likes";
     else if (test(SELECTORS.noMoreProfiles) && !like && !pass) state = "no-more-profiles";
     else if (!like && !pass && !this.header(nodes) && test(SELECTORS.loggedOut)) state = "logged-out";
@@ -259,13 +293,14 @@ export class FeeldDriver {
     const { h } = this.size;
     for (let round = 0; round < 4; round++) {
       const nodes = await this.client.dump().catch(() => []);
-      const strings = this.texts(nodes);
-      if (this.offLimits(strings)) {
+      if (this.offLimits(nodes)) {
         this.log("Feeld is on a settings/profile screen; pressing Back.");
         await this.client.key("BACK");
         await sleep(1200);
         continue;
       }
+      // Already on a card: tapping the tab again would only reset the feed. (The tab's `selected` flag is never set on the real app.)
+      if (this.findVoteButton(nodes, "like") || this.findVoteButton(nodes, "pass")) return true;
       const nav = this.appNodes(nodes).find((n) => n.bounds && area(n) > 0 && center(n).y > h * 0.86 && SELECTORS.nav.test(n.desc || n.text));
       if (nav && !nav.selected) {
         await this.tapNode(nav, "Discover tab");
@@ -292,16 +327,33 @@ export class FeeldDriver {
     return false;
   }
 
+  /** Close the ping sheet without sending: its Cancel button if there is one, else Back. */
+  private async cancelSheet(nodes: UiNode[]): Promise<void> {
+    const cancel = this.appNodes(nodes).find((n) => n.bounds && area(n) > 0 && n.clickable && /^cancel$/i.test(n.desc || n.text));
+    if (cancel && (await this.tapNode(cancel, "cancel"))) {
+      await sleep(800);
+      return;
+    }
+    await this.client.key("BACK");
+    await sleep(800);
+    const after = await this.client.dump().catch(() => []);
+    if (!this.findVoteButton(after, "like")) {
+      const c2 = this.appNodes(after).find((n) => n.bounds && area(n) > 0 && n.clickable && /^cancel$/i.test(n.desc || n.text));
+      if (c2) await this.tapNode(c2, "cancel");
+      else await this.client.key("BACK");
+      await sleep(800);
+    }
+  }
+
   /** Close a match overlay or an upsell. Returns what was done, or null if nothing matched the allowlist. */
   async dismissPopups(): Promise<string | null> {
     const nodes = await this.client.dump().catch(() => []);
-    const strings = this.texts(nodes);
-    if (this.offLimits(strings)) {
+    if (this.offLimits(nodes)) {
       this.log("Feeld is on a settings/profile screen; pressing Back.");
       await this.client.key("BACK");
       return "back";
     }
-    const joined = strings.join("\n");
+    const joined = this.uiJoined(this.texts(nodes));
     const overlay = SELECTORS.upsell.some((re) => re.test(joined)) || SELECTORS.match.some((re) => re.test(joined));
     for (const n of this.appNodes(nodes)) {
       if (!n.bounds || area(n) === 0) continue;
@@ -345,12 +397,39 @@ export class FeeldDriver {
     }
   }
 
-  /** Crop the large images on this screenshot (the profile photos). */
-  private async cropPhotos(png: Buffer, nodes: UiNode[], photos: Buffer[], hashes: bigint[]): Promise<void> {
+  /** The large on-screen images: the profile photos. */
+  private photoNodes(nodes: UiNode[]): UiNode[] {
     const { w, h } = this.size;
-    const imgs = this.appNodes(nodes).filter(
+    return this.appNodes(nodes).filter(
       (n) => n.bounds && /ImageView|Image\b/.test(n.cls) && n.bounds.x2 - n.bounds.x1 >= w * 0.5 && n.bounds.y2 - n.bounds.y1 >= h * 0.18 && n.bounds.y1 >= 0 && n.bounds.y2 <= h,
     );
+  }
+
+  /**
+   * Perceptual hashes of the photos visible right now (one screenshot). Used to recognise a profile
+   * seen before regardless of its name or where it appears in the feed.
+   */
+  async photoHashesOnScreen(nodes: UiNode[]): Promise<string[]> {
+    const imgs = this.photoNodes(nodes);
+    if (!imgs.length) return [];
+    const png = await this.client.screenshotPng().catch(() => null);
+    if (!png) return [];
+    const out: string[] = [];
+    for (const n of imgs.slice(0, 3)) {
+      const b = n.bounds!;
+      try {
+        const crop = await sharp(png).extract({ left: b.x1, top: b.y1, width: b.x2 - b.x1, height: b.y2 - b.y1 }).toBuffer();
+        out.push((await ahash(crop)).toString(16));
+      } catch {
+        /* bounds slightly off; skip */
+      }
+    }
+    return out;
+  }
+
+  /** Crop the large images on this screenshot (the profile photos). */
+  private async cropPhotos(png: Buffer, nodes: UiNode[], photos: Buffer[], hashes: bigint[]): Promise<void> {
+    const imgs = this.photoNodes(nodes);
     for (const n of imgs) {
       if (photos.length >= 12) return;
       const b = n.bounds!;
@@ -428,7 +507,7 @@ export class FeeldDriver {
       const name = hdr?.name ?? null;
       const age = hdr?.age ?? null;
       const text = strings.filter((s) => !SELECTORS.chrome.test(s)).join("\n").slice(0, 6000);
-      return { fingerprint: this.fingerprintOf(name, age, topText), name, age, text, screens, photos };
+      return { fingerprint: this.fingerprintOf(name, age, topText), name, age, text, screens, photos, photoHashes: hashes.map((x) => x.toString(16)) };
     } finally {
       this.onBusy(false);
     }
@@ -442,12 +521,12 @@ export class FeeldDriver {
    * out-of-pings / upsell screen instead of the composer (the caller then sends a like), or
    * "failed" if the composer opened but the card didn't advance.
    */
-  async ping(message: string): Promise<"ping" | "unavailable" | "failed"> {
+  async ping(message: string, opts: { dryRun?: boolean } = {}): Promise<"ping" | "unavailable" | "failed" | "dry-run"> {
     this.onBusy(true);
     try {
       const before = await this.client.dump();
       const strings = this.texts(before);
-      if (this.offLimits(strings)) {
+      if (this.offLimits(before)) {
         await this.client.key("BACK");
         return "unavailable";
       }
@@ -464,29 +543,59 @@ export class FeeldDriver {
       }
       if (!(await this.tapNode(btn, `ping button "${btn.desc || btn.text || btn.id}"`))) return "unavailable";
       await sleep(dwell(1200));
-      // The composer: a text field plus a Send button. Anything else is an upsell or a limit.
+      // The composer on the real app is a bottom sheet titled "Send a Ping" with an "Add a note…" field
+      // (it only becomes an EditText once tapped), a "Send Ping" button and Cancel. Anything else is an
+      // upsell or a limit.
       let nodes = await this.client.dump();
-      const edit = nodes.find((n) => n.pkg === FEELD_PACKAGE && /EditText/.test(n.cls) && n.bounds && area(n) > 0);
-      const joined = this.texts(nodes).join("\n");
-      if (!edit || SELECTORS.outOfPings.some((re) => re.test(joined))) {
+      const isEdit = (n: UiNode) => n.pkg === FEELD_PACKAGE && /EditText/.test(n.cls) && !!n.bounds && area(n) > 0;
+      const noteField = (list: UiNode[]) =>
+        list.find(isEdit) ?? list.find((n) => n.pkg === FEELD_PACKAGE && n.bounds && area(n) > 0 && SELECTORS.pingNote.test(n.text || n.desc)) ?? null;
+      let field = noteField(nodes);
+      const joined = this.uiJoined(this.texts(nodes));
+      if (!field || SELECTORS.outOfPings.some((re) => re.test(joined))) {
         this.log(SELECTORS.outOfPings.some((re) => re.test(joined)) ? "Feeld says you're out of pings." : "Ping didn't open a message composer; treating pings as unavailable.");
-        const what = await this.dismissPopups();
-        if (!what) await this.client.key("BACK");
-        await sleep(800);
+        await this.cancelSheet(nodes);
         return "unavailable";
       }
-      if (!(await this.tapNode(edit, "ping composer"))) return "failed";
-      await sleep(dwell(500));
-      await this.client.typeText(message);
+      if (!(await this.tapNode(field, "ping note field"))) return "failed";
+      await sleep(dwell(700));
+      // Now it's a focused EditText (the sheet shifts up for the keyboard); make sure it has focus before typing.
+      nodes = await this.client.dump();
+      const edit = nodes.find((n) => isEdit(n) && n.focused) ?? nodes.find(isEdit);
+      if (!edit) {
+        this.log("The ping note field didn't take focus; backing out without sending.");
+        await this.cancelSheet(nodes);
+        return "failed";
+      }
+      if (!edit.focused && !(await this.tapNode(edit, "ping note field"))) return "failed";
+      // `input text` over ADB only handles ASCII reliably: straighten quotes and dashes first.
+      await this.client.typeText(asciiPunctuation(message));
       await sleep(dwell(900));
       nodes = await this.client.dump();
-      const send = this.appNodes(nodes).find((n) => n.bounds && area(n) > 0 && (SELECTORS.send.label.test(n.desc || n.text) || SELECTORS.send.id.test(n.id)));
-      if (!send) {
-        this.log("Typed the ping but found no Send button; backing out.");
-        await this.client.key("BACK");
-        await sleep(600);
-        await this.client.key("BACK");
+      const typed = nodes.find(isEdit);
+      if (!typed || typed.text.trim().length < Math.min(message.trim().length, 20) * 0.6) {
+        this.log(`The note field doesn't contain the message after typing (reads "${(typed?.text ?? "").slice(0, 40)}"); backing out without sending.`);
+        await this.cancelSheet(nodes);
         return "failed";
+      }
+      const findSend = (list: UiNode[]) => this.appNodes(list).find((n) => n.bounds && area(n) > 0 && n.clickable && (SELECTORS.send.label.test(n.desc || n.text) || SELECTORS.send.id.test(n.id)));
+      let send = findSend(nodes);
+      if (!send) {
+        // The keyboard may be covering it: close the keyboard (Back closes only the keyboard while a field has focus) and look again.
+        await this.client.key("BACK");
+        await sleep(700);
+        nodes = await this.client.dump();
+        send = findSend(nodes);
+      }
+      if (!send) {
+        this.log("Typed the ping but found no Send button; cancelling without sending.");
+        await this.cancelSheet(nodes);
+        return "failed";
+      }
+      if (opts.dryRun) {
+        this.log(`Dry run: the note reads "${typed.text.slice(0, 60)}" and the "${send.desc || send.text || send.id}" button is there. Cancelling without sending.`);
+        await this.cancelSheet(nodes);
+        return "dry-run";
       }
       if (!(await this.tapNode(send, "send ping"))) return "failed";
       await sleep(dwell(1200));
@@ -513,7 +622,7 @@ export class FeeldDriver {
       const before = await this.client.dump();
       const beforeFp = this.header(before) ? this.fingerprintOf(this.header(before)!.name, this.header(before)!.age, "") : null;
       const beforeSig = this.texts(before).join("|");
-      if (this.offLimits(this.texts(before))) {
+      if (this.offLimits(before)) {
         this.log("Refusing to vote: Feeld is on a settings/profile screen.");
         await this.client.key("BACK");
         return false;
@@ -545,7 +654,7 @@ export class FeeldDriver {
     try {
       const before = await this.client.dump();
       const strings = this.texts(before);
-      if (this.offLimits(strings)) {
+      if (this.offLimits(before)) {
         this.log("Not moving on: Feeld is on a settings/profile screen; pressing Back.");
         await this.client.key("BACK");
         return "blocked";
@@ -612,8 +721,8 @@ export class FeeldDriver {
       const nodes = await this.client.dump().catch(() => null);
       if (!nodes) continue;
       const strings = this.texts(nodes);
-      const joined = strings.join("\n");
-      if (SELECTORS.match.some((re) => re.test(joined))) {
+      const joined = this.uiJoined(strings);
+      if (SELECTORS.match.some((re) => re.test(joined)) && !this.findVoteButton(nodes, "like")) {
         this.matchSeen = true;
         this.log("It's a match! Dismissing the match screen.");
         await this.dismissPopups();

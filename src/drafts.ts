@@ -5,9 +5,9 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
+import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { structuredCall } from "./llm.js";
 import { PHOTOS_DIR } from "./paths.js";
 import { jpegForModel } from "./feeld.js";
 import type { Settings } from "./config.js";
@@ -28,6 +28,22 @@ export interface DraftInput {
   screens: Buffer[];
   /** What the screener noticed, so the drafts can build on it. */
   evidence?: { criterion: string; observation: string; direction: string }[];
+  /** Pings the sender queued before: the draft they started from and what they actually said. */
+  pastPings?: PastPing[];
+}
+
+export interface PastPing {
+  name: string | null;
+  original: string | null;
+  final: string;
+  edited: boolean;
+}
+
+/** Turns saved decisions into examples for the drafter. */
+export function pastPingExamples(ds: Decision[]): PastPing[] {
+  return ds
+    .filter((d) => d.pingMessage?.trim())
+    .map((d) => ({ name: d.name, original: d.pingDraftOriginal ?? null, final: d.pingMessage!.trim(), edited: d.pingEdited ?? (d.pingDraftOriginal ? d.pingDraftOriginal !== d.pingMessage : true) }));
 }
 
 export interface DraftResult {
@@ -35,11 +51,11 @@ export interface DraftResult {
   usage: { input: number; output: number; cacheRead: number };
 }
 
-const client = new Anthropic();
 
-function systemPrompt(persona: string): string {
-  const about = persona.trim()
-    ? `## About the person sending the message\n${persona.trim()}`
+function systemPrompt(persona: string, dateMePage = ""): string {
+  const notes = [persona.trim(), dateMePage.trim() ? `Their own description of what they are looking for (a "date-me" page; use it for who they are and what they value, never quote it, and never recite the list of wants at the recipient):\n${dateMePage.trim().slice(0, 12_000)}` : ""].filter(Boolean);
+  const about = notes.length
+    ? `## About the person sending the message\n${notes.join("\n\n")}`
     : "## About the person sending the message\nNo notes were given. Keep the messages about the other person's profile and end with a question; do not invent facts about the sender.";
   return `You write the opening message for a "ping" on the dating app Feeld: a like that carries a message, delivered before the two people have matched. It is the first thing the recipient reads from the sender, so it has to earn a reply.
 
@@ -69,34 +85,41 @@ export async function draftPings(input: DraftInput, settings: Settings): Promise
   const who = `${input.name ?? "Unknown"}${input.age ? `, ${input.age}` : ""}`;
   content.push({ type: "text", text: `THEIR PROFILE (${who}), text read from the app; may include UI noise:\n\n${input.profileText.slice(0, 8000)}` });
   if (input.evidence?.length) {
-    const lines = input.evidence.filter((e) => e.direction === "for").map((e) => `- ${e.observation}`);
+    const lines = input.evidence.filter((e) => e.direction === "for").map((e) => `- ${e.criterion === "fit" ? "(why they might get on) " : ""}${e.observation}`);
     if (lines.length) content.push({ type: "text", text: `Things a screener noticed in the profile (possible hooks):\n${lines.join("\n")}` });
   }
   input.screens.forEach((s, i) => {
     content.push({ type: "text", text: `Screen ${i + 1} of ${input.screens.length}:` });
     content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: s.toString("base64") } });
   });
+  if (input.pastPings?.length) {
+    const lines = input.pastPings.map((p) => {
+      const to = p.name ? ` (to ${p.name})` : "";
+      if (!p.original) return `- Wrote their own${to}: "${p.final}"`;
+      if (!p.edited) return `- Sent a draft unchanged${to}: "${p.final}"`;
+      return `- Edited a draft${to}.\n  Draft: "${p.original}"\n  Sent:  "${p.final}"`;
+    });
+    content.push({
+      type: "text",
+      text: `How the sender handled earlier drafts (newest first). Their edits and own messages show the voice and length they actually want; drafts sent unchanged show what already works. Match that, do not copy these messages.\n${lines.join("\n")}`,
+    });
+  }
   content.push({ type: "text", text: "Write the three openers and return the JSON object." });
 
-  const isHaiku = /haiku/i.test(settings.draftModel);
-  const response = await client.messages.parse({
-    model: settings.draftModel,
-    max_tokens: 2000,
-    ...(isHaiku ? {} : { thinking: { type: "adaptive" as const } }),
-    output_config: {
-      ...(isHaiku ? {} : { effort: "high" as const }),
-      format: zodOutputFormat(DraftsSchema),
+  const response = await structuredCall(
+    {
+      model: settings.draftModel,
+      effort: "high",
+      maxTokens: 2000,
+      system: [systemPrompt(settings.pingPersona, settings.dateMePage)],
+      content,
+      schema: DraftsSchema,
     },
-    system: [{ type: "text", text: systemPrompt(settings.pingPersona), cache_control: { type: "ephemeral" } }],
-    messages: [{ role: "user", content }],
-  });
-  const usage = {
-    input: response.usage.input_tokens,
-    output: response.usage.output_tokens,
-    cacheRead: response.usage.cache_read_input_tokens ?? 0,
-  };
-  if (response.stop_reason === "refusal") throw new Error("The model declined to draft messages for this profile.");
-  const parsed = response.parsed_output as z.infer<typeof DraftsSchema> | null | undefined;
+    settings,
+  );
+  const usage = response.usage;
+  if (response.refused) throw new Error("The model declined to draft messages for this profile.");
+  const parsed = response.parsed;
   const drafts = (parsed?.drafts ?? [])
     .map((d) => ({ angle: d.angle.trim(), text: d.text.trim().slice(0, MAX_PING_CHARS) }))
     .filter((d) => d.text)

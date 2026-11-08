@@ -24,13 +24,23 @@ export interface Decision {
   threshold: number;
   /** Ping threshold in force at the time, when pings were enabled. */
   pingThreshold?: number;
-  /** Which criterion triggered the recommendation: "veg", "intellectual", or "both". */
-  likedFor?: "veg" | "intellectual" | "both";
-  /** Flagged by you as a reference example of the intellectual criterion; fed into the prompt. */
-  exemplar?: "intellectual" | null;
+  /** Fit as a percentile of the pool scored so far (0-100), from the model's raw fit score. Recomputed as the pool grows. */
+  fitPercentile?: number;
+  /** Fit percentile bars in force at the time (like / ping). */
+  fitLikePercentile?: number;
+  fitPingPercentile?: number;
+  /** Which criterion earned the recommendation: "veg" (diet), "fit" (your date-me page), or "both".
+   *  "intellectual" is the retired exception, kept for old records. */
+  likedFor?: "veg" | "fit" | "both" | "intellectual";
+  /** Flagged by you as a reference example of a good fit; fed into the prompt. ("intellectual": old records.) */
+  exemplar?: "fit" | "intellectual" | null;
+  /** Re-scored from the saved text and screens after the first judgement (e.g. after the criteria changed). */
+  rescoredAt?: string;
   name: string | null;
   age: number | null;
   photos: string[]; // relative URLs under /photos/
+  /** Perceptual hashes (hex) of the profile photos, for recognising the profile again. */
+  photoHashes?: string[];
   classification: Classification | null;
   error?: string;
   usage?: { input: number; output: number; cacheRead: number };
@@ -50,8 +60,14 @@ export interface Decision {
   /** Your review: what to do on Feeld when this profile comes up again. "skip" = leave it alone. */
   review?: Action | "skip" | null;
   reviewedAt?: string | null;
-  /** The ping message you picked or wrote. */
+  /** The ping message you picked or wrote (what will be sent). */
   pingMessage?: string | null;
+  /** Which draft you started from (index into pingDrafts), or null if you wrote your own. */
+  pingDraftIndex?: number | null;
+  /** The draft as the model wrote it, before your edits. */
+  pingDraftOriginal?: string | null;
+  /** True when the message you queued differs from the draft you started from. */
+  pingEdited?: boolean;
   /** Openers drafted for you to pick from. */
   pingDrafts?: PingDraft[];
   draftsModel?: string;
@@ -64,6 +80,10 @@ export interface Decision {
   verdict?: Verdict | null;
   /** Your own probability estimate for this profile, if you gave one. */
   userProbability?: number | null;
+  /** Your grade of the model's fit call: should the fit percentile have been higher, lower, or was it about right? */
+  fitVerdict?: Verdict | null;
+  /** Your own fit percentile (0-100) for this profile, if you gave one. */
+  userFitPercentile?: number | null;
   /** Your free-text note about this call. Fed back to the model as a calibration example. */
   note?: string | null;
 }
@@ -102,6 +122,41 @@ export function getDecision(id: string): Decision | null {
   return readAll().find((d) => d.id === id) ?? null;
 }
 
+/** Recent decisions that could be the profile on screen: everything awaiting action first, then the latest judged. Newest first. */
+export function recognitionCandidates(limit = 1500): Decision[] {
+  const all = readAll();
+  const pending = all.filter((d) => d.review && d.review !== "skip" && !d.applied);
+  const recent = all.slice(-limit);
+  const seen = new Set<string>();
+  const out: Decision[] = [];
+  for (const d of [...pending.reverse(), ...recent.reverse()]) {
+    if (seen.has(d.id)) continue;
+    seen.add(d.id);
+    out.push(d);
+  }
+  return out;
+}
+
+/** The raw fit scores of every scored profile: the pool a percentile is measured against. */
+export function fitPool(): number[] {
+  return readAll()
+    .map((d) => d.classification?.fit_probability)
+    .filter((f): f is number => typeof f === "number");
+}
+
+/** Percentile (0-100) of a raw fit score within the pool: the share of scored profiles it beats, ties counted half. */
+export function fitPercentileOf(score: number, pool: number[] = fitPool()): number {
+  if (!pool.length) return 50;
+  let below = 0;
+  let ties = 0;
+  for (const x of pool) {
+    if (x < score) below++;
+    else if (x === score) ties++;
+  }
+  // The profile itself is usually in the pool; a lone profile sits at the 50th.
+  return Math.round((100 * (below + 0.5 * Math.max(ties, 1))) / Math.max(pool.length, 1));
+}
+
 /** Decisions recorded for a profile fingerprint, newest first. */
 export function decisionsFor(fingerprint: string): Decision[] {
   return readAll()
@@ -135,22 +190,31 @@ export function updateDecision(id: string, patch: Partial<Decision>): Decision |
   return updateMany(new Map([[id, patch]]))[0] ?? null;
 }
 
-export function setVerdict(id: string, verdict: Verdict | null, userProbability?: number | null): Decision | null {
-  const patch: Partial<Decision> = { verdict };
-  if (userProbability !== undefined) patch.userProbability = userProbability;
+/** Your grades and estimates on the diet call (verdict, userProbability) and the fit call (fitVerdict, userFitPercentile). Only the keys present are changed. */
+export type VerdictPatch = Pick<Decision, "verdict" | "userProbability" | "fitVerdict" | "userFitPercentile">;
+export function setVerdict(id: string, patch: VerdictPatch): Decision | null {
   return updateDecision(id, patch);
 }
 
 /** Graded or annotated decisions, newest first, for feeding back into the prompt. */
 export function feedbackExamples(limit = 40): Decision[] {
   return readDecisions(100_000)
-    .filter((d) => d.classification && (d.verdict || (d.note && d.note.trim()) || typeof d.userProbability === "number"))
+    .filter(
+      (d) =>
+        d.classification &&
+        (d.verdict || d.fitVerdict || (d.note && d.note.trim()) || typeof d.userProbability === "number" || typeof d.userFitPercentile === "number" || (d.review && d.review !== "skip" && d.action !== "skipped")),
+    )
     .slice(0, limit);
+}
+
+/** Pings you queued or sent, newest first: what the model drafted and what you actually said. Teaches the drafter your voice. */
+export function pastPings(limit = 8): Decision[] {
+  return readDecisions(100_000).filter((d) => (d.review === "ping" || d.applied === "ping") && d.pingMessage?.trim()).slice(0, limit);
 }
 
 /** Profiles you flagged as reference examples, newest first. */
 export function exemplarProfiles(limit = 5): Decision[] {
-  return readDecisions(100_000).filter((d) => d.exemplar === "intellectual" && d.profileText).slice(0, limit);
+  return readDecisions(100_000).filter((d) => (d.exemplar === "fit" || d.exemplar === "intellectual") && d.profileText).slice(0, limit);
 }
 
 /** What the next batch will do on Feeld: reviewed decisions not yet applied, by action. */
@@ -182,6 +246,9 @@ export function stats(): {
   higher: number;
   lower: number;
   aboutRight: number;
+  fitHigher: number;
+  fitLower: number;
+  fitAboutRight: number;
   /** Mean of (your estimate - model's probability) where you gave an estimate; positive = model too low. */
   meanBias: number | null;
   biasCount: number;
@@ -211,6 +278,9 @@ export function stats(): {
     higher: all.filter((d) => d.verdict === "higher").length,
     lower: all.filter((d) => d.verdict === "lower").length,
     aboutRight: all.filter((d) => d.verdict === "about_right").length,
+    fitHigher: all.filter((d) => d.fitVerdict === "higher").length,
+    fitLower: all.filter((d) => d.fitVerdict === "lower").length,
+    fitAboutRight: all.filter((d) => d.fitVerdict === "about_right").length,
     meanBias,
     biasCount: withEstimate.length,
     meanGutGap,

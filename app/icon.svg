@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2433"/>
+      <stop offset="1" stop-color="#0d1118"/>
+    </linearGradient>
+    <linearGradient id="leaf" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#2fae7f"/>
+      <stop offset="1" stop-color="#7ee2b0"/>
+    </linearGradient>
+    <linearGradient id="leaf2" x1="1" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#279a70"/>
+      <stop offset="1" stop-color="#5fd49c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.72" r="0.5">
+      <stop offset="0" stop-color="#34c38f" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#34c38f" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- macOS icon: rounded square, inset from the 1024 canvas -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#glow)"/>
+  <rect x="104" y="104" width="816" height="816" rx="181" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="8"/>
+  <!-- sprout: stem -->
+  <path d="M512 770 C512 640 500 560 470 500" fill="none" stroke="#3fbf8c" stroke-width="34" stroke-linecap="round"/>
+  <!-- left leaf -->
+  <path d="M470 500 C360 520 300 440 300 350 C400 345 480 400 470 500 Z" fill="url(#leaf2)"/>
+  <path d="M470 500 C420 455 380 410 335 365" fill="none" stroke="#1d7a57" stroke-opacity="0.55" stroke-width="10" stroke-linecap="round"/>
+  <!-- right leaf -->
+  <path d="M512 560 C520 440 600 330 740 320 C750 460 650 560 512 560 Z" fill="url(#leaf)"/>
+  <path d="M512 560 C570 500 640 420 715 352" fill="none" stroke="#1d7a57" stroke-opacity="0.55" stroke-width="10" stroke-linecap="round"/>
+  <!-- soil line -->
+  <path d="M330 790 Q512 740 694 790" fill="none" stroke="#34c38f" stroke-opacity="0.7" stroke-width="22" stroke-linecap="round"/>
+</svg>

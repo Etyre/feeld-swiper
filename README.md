@@ -51,7 +51,8 @@ Feeld's Android UI isn't something I could see while building this (the app need
 | `src/location.ts` | Sets the emulator's GPS to the city chosen in Settings → Device. |
 | `src/llm.ts` | `structuredCall`: one structured Claude call on the API or Agent SDK backend, plus the shared preamble, `contact_eli` tool and inbox check. |
 | `src/classifier.ts` | Builds the screener request (text + screens), parses the two probabilities, computes the arithmetic posterior, decides the tier. |
-| `src/prompt.ts` | The screener's system prompt (Bayesian procedure, fit guidance) and the calibration-feedback block. |
+| `src/prompt.ts` | Assembles the screener's system prompt from `data/criteria.md` (the criterion, evidence rubric and fit guidance; personal, untracked) and the calibration-feedback block. |
+| `criteria.example.md` | Committed stand-in for `data/criteria.md` showing its shape and the `{{priorPct}}` / `{{neededLR}}` placeholders; used, with a warning, when the real file is missing. |
 | `src/drafts.ts` | Drafts three ping openers in your voice from the profile and your past edits. |
 | `src/rescore.ts` | Re-scores saved profiles without the phone; re-tiers the queue when thresholds change. |
 | `src/store.ts` | `data/decisions.jsonl` read/write, reviews, grades, fit pool and percentiles. |
@@ -71,6 +72,7 @@ Why these dependencies: `express`/`ws` for the dashboard and phone stream, `shar
 - Project and installed copy: `~/Documents/agent-coding/feeld-swiper` (runs in place; `Feeld Swiper.app` in `/Applications` is only a launcher pointing here).
 - Secrets: `.env` in the project (untracked; `.env.example` is the template).
 - Settings: `data/settings.json`, edited from the dashboard sidebar.
+- Selection criteria: `data/criteria.md` (untracked, personal). Start from `criteria.example.md`.
 - State: `data/decisions.jsonl` (every profile and decision), `data/photos/<id>/` (screens and crops), `data/errors/` (screenshots on failure). `FEELD_DATA_DIR` replaces `data/` wholesale. The whole `data/` folder is gitignored (personal, ~200 MB).
 - Logs: the dashboard's Live tab (also `GET /api/state` → `log`); `data/server.log` when started from the Dock launcher, stdout under `npm run dev`.
 - Android: the `feeld` AVD under `~/.android/avd/`; platform tools and command-line tools from Homebrew.
